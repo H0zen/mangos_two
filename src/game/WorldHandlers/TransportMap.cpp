@@ -508,12 +508,34 @@ bool TransportMap::Board(Player* passenger, float x, float y, float z, float o, 
     passenger->SetTransport(m_vessel);
     passenger->m_movementInfo.SetTransportData(m_vessel->GetObjectGuid(), x, y, z, o, 0, -1);
 
-    // Her world pose, coarse and temporary -- it names the grid the client must load and
-    // nothing else. The deck offset above is what actually places him.
-    if (passenger->TeleportTo(sailed->GetId(),
-                              m_vessel->Where().X(), m_vessel->Where().Y(),
-                              m_vessel->Where().Z(), m_vessel->Where().Facing(),
-                              options | TELE_TO_NOT_LEAVE_TRANSPORT))
+    // ALREADY ON THE WATER SHE SAILS: there is no world map to change, so this is the
+    // walk-aboard case and Embark is the whole of it -- the same primitive
+    // HandleMoverRelocation uses, and the only one 00 has at all.
+    //
+    // Teleporting anyway asks TeleportTo for a port to the map he is standing on. Its
+    // near branch is `GetMapId() == mapid && !m_transport`, and m_transport was set six
+    // lines above, so the FAR branch runs instead and Map::CanEnter asserts "already in
+    // map" -- MANGOS_ASSERT, so the world thread aborts and the server is gone. The `.tele`
+    // that found it was Icecrown to a deck on the Icebreaker, which sails Icecrown.
+    // Upstream's own TODO on that condition predicted this.
+    if (passenger->GetMap() == sailed)
+    {
+        Embark(passenger);
+
+        // Embark returns void and declines silently -- not commissioned, not in world. Ask
+        // the map, not the call, so a refusal still reaches the rollback below rather than
+        // leaving him holding a ship he is not standing on.
+        if (passenger->GetMap() == this)
+        {
+            return true;
+        }
+    }
+    // Otherwise her world pose, coarse and temporary -- it names the grid the client must
+    // load and nothing else. The deck offset above is what actually places him.
+    else if (passenger->TeleportTo(sailed->GetId(),
+                                   m_vessel->Where().X(), m_vessel->Where().Y(),
+                                   m_vessel->Where().Z(), m_vessel->Where().Facing(),
+                                   options | TELE_TO_NOT_LEAVE_TRANSPORT))
     {
         return true;
     }
