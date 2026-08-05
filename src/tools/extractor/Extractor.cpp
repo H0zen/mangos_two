@@ -370,7 +370,17 @@ namespace
                     ? wmo.Load(entry.second)
                     : m2.Load(entry.second);
 
-            if (!model || model->Empty())
+            // A NULL MODEL IS A BROKEN CLIENT, not a display without collision: since the
+            // loaders started answering null for a missing WMO root, a missing declared
+            // group or a corrupt M2, counting it as "empty" left no go_*.tile for that
+            // door, bridge, lift or hull while the stage still exited 0.
+            if (!model)
+            {
+                ++failed;
+                g_console.Error("gomodels: cannot load " + entry.second);
+                continue;
+            }
+            if (model->Empty())
             {
                 ++empty;
                 continue;

@@ -122,13 +122,24 @@ namespace world::terrain
         }
 
         // ABSENT AND BROKEN ARE DIFFERENT ANSWERS, and this function can only give one of
-        // them. Map.dbc lists identities that never had a WDT and BakeMap is right to pass
-        // over those; a WDT that IS there and will not read or parse is a truncated or
-        // stale-format client, and collapsing it to the same nullptr let a full extraction
-        // drop that map's entire tile and nav cache and still exit 0.
+        // them. Map.dbc lists identities that never had a WDT -- every `Transport<entry>`
+        // vessel row has a directory and no WDT at all -- and BakeMap is right to pass
+        // over those; a WDT the archive HAS and cannot serve or parse is a truncated or
+        // stale-format client, and collapsing the two let a full extraction drop that
+        // map's entire tile and nav cache and still exit 0. Hence Contains(), not Read():
+        // a read miss on its own does not distinguish them.
         std::vector<uint8_t> bytes;
         WdtData wdt;
-        if (!m_archive.Read(path, bytes) || !ParseWdt(bytes, wdt))
+        if (!m_archive.Read(path, bytes))
+        {
+            if (m_archive.Contains(path))
+            {
+                m_wdtBroken.insert(mapId);
+            }
+            return nullptr;
+        }
+
+        if (!ParseWdt(bytes, wdt))
         {
             m_wdtBroken.insert(mapId);
             return nullptr;
@@ -141,13 +152,15 @@ namespace world::terrain
         return m_wdtBroken.find(mapId) != m_wdtBroken.end();
     }
 
-    void MpqTileSource::AttachWmoDoodads(const Placement& p, const std::string& wmoPath,
+    /// False when a doodad this set names could not be loaded -- the same failure the
+    /// placement loop reports, since a WMO's furniture is collision like any other.
+    bool MpqTileSource::AttachWmoDoodads(const Placement& p, const std::string& wmoPath,
                                          const Transform& wmoXf, TerrainTile& tile)
     {
         const WmoRootData* root = m_wmo.Root(wmoPath);
         if (!root || root->sets.empty())
         {
-            return;
+            return true;
         }
 
         // The placement names the one furnishing set that exists in the world; baking
@@ -155,6 +168,7 @@ namespace world::terrain
         const uint32_t setIdx = (p.doodadSet < root->sets.size()) ? p.doodadSet : 0u;
         const WmoDoodadSet& set = root->sets[setIdx];
 
+        bool ok = true;
         const uint64_t end = uint64_t(set.start) + set.count;
         for (uint64_t i = set.start; i < end && i < root->doodads.size(); ++i)
         {
@@ -164,7 +178,12 @@ namespace world::terrain
                 continue;
             }
             auto model = m_m2.Load(d.name);
-            if (!model || model->Empty())
+            if (!model)
+            {
+                ok = false;
+                continue;
+            }
+            if (model->Empty())
             {
                 continue;
             }
@@ -176,6 +195,7 @@ namespace world::terrain
             inst.adtId = p.nameSet;
             tile.instances.push_back(std::move(inst));
         }
+        return ok;
     }
 
     std::shared_ptr<TerrainTile> MpqTileSource::LoadAdt(uint32_t mapId, int tx, int ty)
@@ -243,10 +263,20 @@ namespace world::terrain
             return tile;
         }
 
+        bool loadFailed = false;
         auto attach = [&](const Placement& p,
                           const std::shared_ptr<const ICollisionModel>& model)
         {
-            if (!model || model->Empty())
+            // NULL IS A FAILED LOAD, Empty is a model with no collision. Since the loaders
+            // started answering null for a missing root, a missing declared group or a
+            // corrupt M2, treating the two alike baked the tile without that building and
+            // reported success -- BakeMap only ever looks at hasTerrain.
+            if (!model)
+            {
+                loadFailed = true;
+                return;
+            }
+            if (model->Empty())
             {
                 return;
             }
@@ -266,7 +296,10 @@ namespace world::terrain
             }
             const std::string& wmoPath = adt.wmoNames[p.nameIndex];
             attach(p, m_wmo.Load(wmoPath));
-            AttachWmoDoodads(p, wmoPath, PlacementTransform(p), *tile);
+            if (!AttachWmoDoodads(p, wmoPath, PlacementTransform(p), *tile))
+            {
+                loadFailed = true;
+            }
         }
 
         for (const Placement& p : adt.m2Placements)
@@ -275,6 +308,11 @@ namespace world::terrain
             {
                 attach(p, m_m2.Load(adt.m2Names[p.nameIndex]));
             }
+        }
+
+        if (loadFailed)
+        {
+            return nullptr;
         }
 
         return tile;
@@ -312,8 +350,14 @@ namespace world::terrain
         inst.adtId = wdt->globalWmoPlacement->nameSet;
         tile->instances.push_back(std::move(inst));
 
-        // A dungeon IS one big WMO, so all of its furniture is doodads.
-        AttachWmoDoodads(*wdt->globalWmoPlacement, wdt->globalWmoName, xf, *tile);
+        // A dungeon IS one big WMO, so all of its furniture is doodads -- and a doodad that
+        // will not load is the same failure the ADT placement loop reports. Discarding this
+        // answer wrote the map's one tile without that collision and called it ok; the
+        // result is not cached either, so the next call retries rather than serving it.
+        if (!AttachWmoDoodads(*wdt->globalWmoPlacement, wdt->globalWmoName, xf, *tile))
+        {
+            return nullptr;
+        }
 
         m_globalWmoCache[mapId] = tile;
         return tile;

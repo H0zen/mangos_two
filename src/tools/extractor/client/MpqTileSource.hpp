@@ -47,7 +47,7 @@ namespace world::terrain
     private:
         std::shared_ptr<TerrainTile> LoadAdt(uint32_t mapId, int tx, int ty);
         std::shared_ptr<TerrainTile> LoadGlobalWmo(uint32_t mapId);
-        void AttachWmoDoodads(const Placement& p, const std::string& wmoPath,
+        bool AttachWmoDoodads(const Placement& p, const std::string& wmoPath,
                               const Transform& wmoXf, TerrainTile& tile);
 
         IMpqArchive& m_archive;

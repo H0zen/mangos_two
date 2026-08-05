@@ -201,7 +201,9 @@ namespace world::terrain
         // bulk of a root's bytes are -- still returned true, and WmoLoader then baked the
         // groups against doodads that were partial or absent: the building stands, the
         // furniture inside it has no collision, and the extraction reports success.
-        return sawHeader && !truncated;
+        // `pos != n` is the same hole one byte earlier, for the same reason it is checked
+        // in ParseWmoGroup: the overrun flag needs a COMPLETE header to fire.
+        return sawHeader && !truncated && pos == n;
     }
 
     WmoGroupParse ParseWmoGroup(const uint8_t* d, size_t n, uint32_t rootFlags,
@@ -284,7 +286,13 @@ namespace world::terrain
         // A group file IS a MOGP container, so no MOGP -- or one whose header runs past
         // the end, or a chunk declaring more bytes than the file holds -- is a broken
         // file, not a group with nothing in it. Everything past here is a real group.
-        if (truncated || !mogp || mogp + MOGP_HEADER > d + n)
+        //
+        // `pos != n` is the case the overrun flag cannot see: stepping into MOGP by its
+        // header and walking the nested chunks consumes exactly the container's bytes, so
+        // a well-formed group ends ON the end. A file cut 1-7 bytes into a nested header
+        // leaves the loop by its `pos + 8 <= n` condition without ever entering the body,
+        // and used to answer Empty or Loaded with that geometry silently missing.
+        if (truncated || pos != n || !mogp || mogp + MOGP_HEADER > d + n)
         {
             return WmoGroupParse::Malformed;
         }

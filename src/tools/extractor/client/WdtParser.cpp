@@ -20,14 +20,16 @@ namespace world::terrain
         const uint8_t* modf = nullptr;
         uint32_t modfSize = 0;
 
+        bool truncated = false;
         size_t pos = 0;
         while (pos + 8 <= size)
         {
             const uint8_t* tag = data + pos;
             const uint32_t csize = RdU32(data + pos + 4);
             const uint8_t* body = data + pos + 8;
-            if (pos + 8 + csize > size)
+            if (static_cast<uint64_t>(pos) + 8 + csize > size)
             {
+                truncated = true;
                 break;
             }
 
@@ -80,6 +82,11 @@ namespace world::terrain
             out.globalWmoPlacement = ReadModf(modf);
         }
 
-        return true;
+        // A WDT CUT INSIDE MAIN IS NOT A MAP WITHOUT TERRAIN. Breaking out and answering
+        // true recorded no grid entries, so Wdt() cached it as a valid no-terrain map and
+        // BakeMap passed over it -- a full extraction omitting that map's whole tile and
+        // nav cache, at exit 0. `pos != size` catches the other half: a walk that stops on
+        // 1-7 bytes of a partial header never enters the loop body to notice.
+        return !truncated && pos == size;
     }
 }

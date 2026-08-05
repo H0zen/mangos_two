@@ -27,7 +27,9 @@
 #include "TestHarness.h"
 
 #include "AdtParser.hpp"
+#include "IMpqArchive.hpp"
 #include "M2Parser.hpp"
+#include "ModelLoaders.hpp"
 #include "WdtParser.hpp"
 #include "WmoParser.hpp"
 
@@ -738,6 +740,79 @@ TEST(WdtGridAndGlobalWmo)
     CHECK_EQ(d.globalWmoPlacement->pos.y, 18.f);
 }
 
+// A WDT cut inside MAIN recorded no grid entries and still answered true, so Wdt()
+// cached it as a legitimate no-terrain map and BakeMap passed over it -- a full
+// extraction omitting that map's whole tile and nav cache, at exit 0.
+TEST(WdtTruncatedInsideMainFailsTheParse)
+{
+    Blob mphd;
+    mphd.U32(0);
+    mphd.Pad(28);
+
+    Blob wdt;
+    PutChunk(wdt, "MPHD", mphd);
+    wdt.U8('N'); wdt.U8('I'); wdt.U8('A'); wdt.U8('M');
+    wdt.U32(64 * 64 * 8);               // declares the full grid
+    wdt.Pad(128);                       // and carries almost none of it
+
+    WdtData d;
+    CHECK(!ParseWdt(wdt.b, d));
+}
+
+// The overrun flag is only set once a COMPLETE 8-byte header has been read, so a file
+// cut 1-7 bytes into the next header leaves the loop by its own condition with nothing
+// flagged. Chunks tile a WDT exactly; anything left over is a cut file.
+TEST(WdtWithAPartialTrailingHeaderFailsTheParse)
+{
+    Blob mphd;
+    mphd.U32(0);
+    mphd.Pad(28);
+
+    Blob wdt;
+    PutChunk(wdt, "MPHD", mphd);
+    wdt.U8('N'); wdt.U8('I'); wdt.U8('A');   // three bytes of a tag, no size
+
+    WdtData d;
+    CHECK(!ParseWdt(wdt.b, d));
+}
+
+TEST(AdtWithAPartialTrailingHeaderFailsTheParse)
+{
+    float mcvt[145];
+    FillRamp(mcvt, 0.f);
+
+    Blob adt;
+    PadTile(adt, 1, 1);
+    PutChunk(adt, "MCNK", MakeMcnk(1, 1, 0.f, 0, 0, mcvt));
+    adt.U8('O'); adt.U8('2'); adt.U8('H');   // a partial tag, no size
+
+    AdtData d;
+    CHECK(!ParseAdt(adt.b, d));
+}
+
+TEST(WmoGroupWithAPartialTrailingHeaderIsMalformed)
+{
+    Blob nested;
+    Blob group = MakeMogpGroup(0, 15, 0, nested);
+    group.U8('Y'); group.U8('P'); group.U8('O');   // a partial tag, no size
+
+    WmoGroupData g;
+    CHECK(ParseWmoGroup(group.b, 0, g) == WmoGroupParse::Malformed);
+}
+
+TEST(WmoRootWithAPartialTrailingHeaderIsRejected)
+{
+    Blob mohd;
+    mohd.Pad(64);
+
+    Blob root;
+    PutChunk(root, "MOHD", mohd);
+    root.U8('N'); root.U8('D'); root.U8('O');      // a partial tag, no size
+
+    WmoRootData r;
+    CHECK(!ParseWmoRoot(root.b, r));
+}
+
 namespace
 {
     // A model whose real bounding block sits at `block`; the other candidate offset is
@@ -1018,4 +1093,54 @@ TEST(M2PathRewritesModelExtension)
     CHECK(M2PathOf("a\\b.MDX") == "a\\b.m2");
     CHECK(M2PathOf("a\\b.mdl") == "a\\b.m2");
     CHECK(M2PathOf("a\\b.m2") == "a\\b.m2");
+}
+
+// ABSENT IS NOT BROKEN, and null is what the loaders now mean by broken. Every caller
+// -- the ADT placement loop, the WMO doodad attach, BakeGoModels -- reads null as a
+// failed extraction, so a display id naming a file the client never shipped must not
+// answer null. GameObjectDisplayInfo.dbc carries such dead rows: a full 5.4.8 bake
+// failed 21 of them before this distinction existed, all four cases below untested.
+
+TEST(M2LoaderAnswersAModelWithoutCollisionForAnAbsentFile)
+{
+    MemoryArchive archive;
+    M2Loader loader(archive);
+
+    auto model = loader.Load("aaaaaaaaa\\testdonotcommit4.mdx");
+    REQUIRE(model != nullptr);
+    CHECK(model->Empty());
+}
+
+TEST(M2LoaderAnswersNullForAPresentFileThatIsNotAnM2)
+{
+    MemoryArchive archive;
+    archive.Put("World\\junk.m2", {'N', 'O', 'T', 'M', 'D', '2', '0', 0});
+    M2Loader loader(archive);
+
+    CHECK(loader.Load("World\\junk.m2") == nullptr);
+}
+
+TEST(WmoLoaderAnswersAModelWithoutCollisionForAnAbsentRoot)
+{
+    MemoryArchive archive;
+    WmoLoader loader(archive, nullptr);
+
+    auto model = loader.Load("<empty>\\KL_OnyxiasLair.wmo");
+    REQUIRE(model != nullptr);
+    CHECK(model->Empty());
+}
+
+TEST(WmoLoaderAnswersNullForAPresentRootWithNoHeader)
+{
+    Blob mover;
+    mover.Pad(12);
+
+    Blob root;
+    PutChunk(root, "MOVR", mover);          // a chunk, but never the MOHD
+
+    MemoryArchive archive;
+    archive.Put("World\\wmo\\Broken.wmo", root.b);
+    WmoLoader loader(archive, nullptr);
+
+    CHECK(loader.Load("World\\wmo\\Broken.wmo") == nullptr);
 }
