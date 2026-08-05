@@ -9,7 +9,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <fstream>
 #include <limits>
 #include <utility>
 
@@ -26,21 +25,25 @@ namespace world::terrain
         std::string g_tileDir;
 
         float SegmentHitFrac(const std::vector<const StaticInstance*>& instances,
-                             const Vec3& a, const Vec3& b)
+                             const Vec3& a, const Vec3& b, ModelIgnoreFlags ignore)
         {
             const Vec3 seg = b - a;
             if (dot(seg, seg) < 1e-6f)
             {
-                return 2.0f;
+                return NO_HIT_FRACTION;
             }
 
             auto inv = [](float d) { return std::fabs(d) > 1e-9f ? 1.0f / d : 1e30f; };
             const Vec3 invDir{inv(seg.x), inv(seg.y), inv(seg.z)};
 
-            float best = 2.0f;
+            const bool skipMeshes =
+                (ignore & ModelIgnoreFlags::M2) != ModelIgnoreFlags::Nothing;
+
+            float best = NO_HIT_FRACTION;
             for (const StaticInstance* inst : instances)
             {
                 if (!inst->model || inst->model->Empty() ||
+                    (skipMeshes && inst->model->Kind() == ModelKind::Mesh) ||
                     !inst->worldBounds.intersectsRay(a, invDir, 1.0f))
                 {
                     continue;
@@ -74,14 +77,15 @@ namespace world::terrain
         {
             return false;
         }
-        if (std::ifstream(g_tileDir + "/" + TileFileName(mapId, tx, ty),
-                          std::ios::binary).good())
+        // READS the tile, does not merely open it: a truncated or stale-format file opens
+        // fine and then fails ReadTile at query time, which is a server that starts and
+        // answers nothing. Only the startup probe asks, never a query path.
+        if (ReadTile(g_tileDir + "/" + TileFileName(mapId, tx, ty)))
         {
             return true;
         }
         // A map built from one global WMO carries no ADT grid tiles at all.
-        return std::ifstream(g_tileDir + "/" + GlobalWmoFileName(mapId),
-                             std::ios::binary).good();
+        return ReadTile(g_tileDir + "/" + GlobalWmoFileName(mapId)) != nullptr;
     }
 
     FusedTerrain::TilePtr FusedTerrain::LoadCell(int tx, int ty) const
@@ -99,8 +103,11 @@ namespace world::terrain
 
     FusedTerrain::TilePtr FusedTerrain::TileAt(float x, float y) const
     {
-        const int tx = TileIndex(x);
-        const int ty = TileIndex(y);
+        return TileAtIndex(TileIndex(x), TileIndex(y));
+    }
+
+    FusedTerrain::TilePtr FusedTerrain::TileAtIndex(int tx, int ty) const
+    {
         if (tx < 0 || tx >= GRID_COUNT || ty < 0 || ty >= GRID_COUNT)
         {
             return nullptr;
@@ -161,9 +168,10 @@ namespace world::terrain
 
     void FusedTerrain::EvictTile(int tx, int ty) const
     {
-        // m_loaded goes back to 0 so the next query re-probes. The absent-tile memo is
-        // not kept here: its whole value is recording that the file is missing, and this
-        // tile plainly exists.
+        // m_loaded goes back to 0 so the next query re-probes. That applies to the
+        // absent-tile memo as much as to a resident tile: the memo saves a failed open
+        // per query, which is worth having, but never expiring it means a file that
+        // appears later is invisible for the life of the process.
         m_tiles[tx][ty].reset();
         m_loaded[tx][ty] = 0;
         m_tileLastUse[tx][ty].store(0, std::memory_order_relaxed);
@@ -189,7 +197,16 @@ namespace world::terrain
         {
             for (int ty = 0; ty < GRID_COUNT; ++ty)
             {
-                if (!m_tiles[tx][ty] || m_cellRef[tx][ty] > 0)
+                if (m_cellRef[tx][ty] > 0)
+                {
+                    continue;
+                }
+
+                // A null-but-probed entry is swept too, not just a resident tile. It is
+                // only a memo saying "no such file", and keeping it forever means a tile
+                // that appears after start -- a re-bake, a mount that came up late --
+                // is never looked for again for the life of the process.
+                if (!m_tiles[tx][ty] && !m_loaded[tx][ty])
                 {
                     continue;
                 }
@@ -211,7 +228,10 @@ namespace world::terrain
             return;
         }
         std::lock_guard<std::mutex> lock(m_cellRefMutex);
-        ++m_cellRef[tx][ty];
+        if (m_cellRef[tx][ty] != std::numeric_limits<uint32_t>::max())
+        {
+            ++m_cellRef[tx][ty];
+        }
     }
 
     void FusedTerrain::UnpinCell(int tx, int ty)
@@ -273,6 +293,7 @@ namespace world::terrain
         const Vec3 downWorld{0.0f, 0.0f, -1.0f};
 
         std::vector<float> hits;
+        std::vector<ICollisionModel::LocalLiquid> liquids;
 
         auto probe = [&](const std::vector<StaticInstance>& instances)
         {
@@ -308,26 +329,33 @@ namespace world::terrain
                 // The ray origin doubles as the liquid probe: MLIQ is indexed by local X
                 // and Y alone, and every real placement is a Z-rotation plus a
                 // translation, so which height along the column it is taken from cannot
-                // change the pair those come out as.
+                // change the pair those come out as. That holds ONLY while the model
+                // gathers every surface over the column; the moment it picks one, this
+                // origin is the sweep top rather than the query, and it picks by the
+                // wrong Z. Keep the choice out of the model.
                 const Vec3 pointLocal = inst.xf.worldToLocal(originWorld);
-                if (auto local = inst.model->LiquidLocal(pointLocal))
+                liquids.clear();
+                inst.model->LiquidsLocal(pointLocal, liquids);
+                for (const auto& local : liquids)
                 {
-                    const LiquidKind kind = static_cast<LiquidKind>(local->kind);
-                    if (kind != LiquidKind::None)
+                    const LiquidKind kind = static_cast<LiquidKind>(local.kind);
+                    if (kind == LiquidKind::None)
                     {
-                        // Lift the surface back through the placement itself: it sits
-                        // directly over the query column, so transforming that exact
-                        // point is exact. Reconstructing the lift by hand applies the
-                        // placement scale twice and assumes the model's local Z is
-                        // parallel to world Z.
-                        const Vec3 surfaceLocal{pointLocal.x, pointLocal.y, local->z};
-                        LiquidInfo info;
-                        info.level = inst.xf.localToWorld(surfaceLocal).z;
-                        info.kind = kind;
-                        info.entry = local->entry;
-                        info.deep = local->deep;
-                        column.AddLiquid(info);
+                        continue;
                     }
+
+                    // Lift the surface back through the placement itself: it sits
+                    // directly over the query column, so transforming that exact
+                    // point is exact. Reconstructing the lift by hand applies the
+                    // placement scale twice and assumes the model's local Z is
+                    // parallel to world Z.
+                    const Vec3 surfaceLocal{pointLocal.x, pointLocal.y, local.z};
+                    LiquidInfo info;
+                    info.level = inst.xf.localToWorld(surfaceLocal).z;
+                    info.kind = kind;
+                    info.entry = local.entry;
+                    info.deep = local.deep;
+                    column.AddLiquid(info);
                 }
             }
         };
@@ -345,7 +373,7 @@ namespace world::terrain
         {
             if (auto adt = tile->LiquidAt(x, y))
             {
-                column.AddLiquid(*adt);
+                column.AddLiquid(*adt, true);
             }
         }
 
@@ -363,10 +391,6 @@ namespace world::terrain
     {
         const float minx = std::min(a.x, b.x), maxx = std::max(a.x, b.x);
         const float miny = std::min(a.y, b.y), maxy = std::max(a.y, b.y);
-
-        const float dx = b.x - a.x, dy = b.y - a.y;
-        const float lengthXY = std::sqrt(dx * dx + dy * dy);
-        const int samples = std::max(2, int(lengthXY / (TILE_SIZE * 0.5f)) + 2);
 
         auto gather = [&](const TilePtr& tile)
         {
@@ -386,43 +410,91 @@ namespace world::terrain
             }
         };
 
-        int lastTx = 0, lastTy = 0;
-        bool seen = false;
-        for (int i = 0; i < samples; ++i)
+        // EVERY tile the segment crosses, by grid traversal rather than by sampling the
+        // line at fixed steps. Stepping half a tile at a time misses any tile the segment
+        // only clips a corner of, and a model living solely on that tile then does not
+        // exist for this ray: sight straight through a building, or a fall through a
+        // bridge. Tile indices grow as the coordinate SHRINKS, which is what the
+        // MAP_CENTER minus term below is.
+        const float u0 = MAP_CENTER - a.x / TILE_SIZE, v0 = MAP_CENTER - a.y / TILE_SIZE;
+        const float u1 = MAP_CENTER - b.x / TILE_SIZE, v1 = MAP_CENTER - b.y / TILE_SIZE;
+        if (!::Geometry::isFinite(u0) || !::Geometry::isFinite(v0) ||
+            !::Geometry::isFinite(u1) || !::Geometry::isFinite(v1))
         {
-            const float f = float(i) / float(samples - 1);
-            const float px = a.x + dx * f, py = a.y + dy * f;
-            const int tx = TileIndex(px), ty = TileIndex(py);
-            if (seen && tx == lastTx && ty == lastTy)
-            {
-                continue;
-            }
-            seen = true;
-            lastTx = tx;
-            lastTy = ty;
+            gather(GlobalWmo());
+            return;
+        }
+
+        auto visit = [&](int tx, int ty)
+        {
+            // The far edge lands exactly on the count, the same closed upper bound
+            // TileIndex folds; anything further out is genuinely off the map.
+            tx = tx == GRID_COUNT ? GRID_COUNT - 1 : tx;
+            ty = ty == GRID_COUNT ? GRID_COUNT - 1 : ty;
             if (tx >= 0 && tx < GRID_COUNT && ty >= 0 && ty < GRID_COUNT)
             {
-                gather(TileAt(px, py));
+                gather(TileAtIndex(tx, ty));
             }
+        };
+
+        int tx = int(std::floor(u0)), ty = int(std::floor(v0));
+        const int txEnd = int(std::floor(u1)), tyEnd = int(std::floor(v1));
+        const float du = u1 - u0, dv = v1 - v0;
+        const int stepX = du > 0.f ? 1 : (du < 0.f ? -1 : 0);
+        const int stepY = dv > 0.f ? 1 : (dv < 0.f ? -1 : 0);
+
+        constexpr float FAR_OFF = std::numeric_limits<float>::max();
+        float tMaxX = FAR_OFF, tMaxY = FAR_OFF, tDeltaX = FAR_OFF, tDeltaY = FAR_OFF;
+        if (stepX != 0)
+        {
+            tMaxX = ((stepX > 0 ? float(tx + 1) : float(tx)) - u0) / du;
+            tDeltaX = std::fabs(1.f / du);
+        }
+        if (stepY != 0)
+        {
+            tMaxY = ((stepY > 0 ? float(ty + 1) : float(ty)) - v0) / dv;
+            tDeltaY = std::fabs(1.f / dv);
+        }
+
+        visit(tx, ty);
+        for (int guard = 0; (tx != txEnd || ty != tyEnd) && guard < 4 * GRID_COUNT;
+             ++guard)
+        {
+            if (tMaxX < tMaxY)
+            {
+                tx += stepX;
+                tMaxX += tDeltaX;
+            }
+            else
+            {
+                ty += stepY;
+                tMaxY += tDeltaY;
+            }
+            visit(tx, ty);
         }
 
         gather(GlobalWmo());
     }
 
     float FusedTerrain::NearestHitFraction(float x1, float y1, float z1, float x2,
-                                           float y2, float z2) const
+                                           float y2, float z2,
+                                           ModelIgnoreFlags ignore) const
     {
         const Vec3 a{x1, y1, z1}, b{x2, y2, z2};
         std::vector<const StaticInstance*> instances;
         std::vector<TilePtr> keepAlive;
         CollectSegmentInstances(a, b, instances, keepAlive);
-        return SegmentHitFrac(instances, a, b);
+        return SegmentHitFrac(instances, a, b, ignore);
     }
 
     bool FusedTerrain::IsInLineOfSight(float x1, float y1, float z1, float x2, float y2,
-                                       float z2) const
+                                       float z2, ModelIgnoreFlags ignore) const
     {
-        return NearestHitFraction(x1, y1, z1, x2, y2, z2) > 1.0f;
+        // A hit AT the far end blocks: the fraction has to be strictly past 1. Callers
+        // lift the endpoint off the target for exactly this reason, and
+        // DynamicCollision::IsInLineOfSight uses the same comparison -- the two must not
+        // drift apart, or static and dynamic geometry answer the same segment differently.
+        return NearestHitFraction(x1, y1, z1, x2, y2, z2, ignore) > 1.0f;
     }
 
     uint16_t FusedTerrain::GetAreaId(float x, float y) const
@@ -466,9 +538,11 @@ namespace world::terrain
                 {
                     continue;
                 }
+                // Vertically inside the box too: a WMO whose roof is below the querier is
+                // a building being FLOWN OVER, and taking its area reports a player in
+                // open air as indoors. MAX_DROP bounds the ray, not what counts as inside.
                 const Aabb& wb = inst.worldBounds;
-                if (!wb.coversColumn(x, y) || wb.hi.z < ceiling - MAX_DROP ||
-                    wb.lo.z > ceiling + 0.1f)
+                if (!wb.coversColumn(x, y) || wb.hi.z < z || wb.lo.z > ceiling + 0.1f)
                 {
                     continue;
                 }

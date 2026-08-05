@@ -6,6 +6,7 @@
 #include <cmath>
 #include <limits>
 #include <type_traits>
+#include <utility>
 
 namespace world::terrain
 {
@@ -183,6 +184,70 @@ namespace world::terrain
         m_nodes[self].right = r;
         m_nodes[self].count = 0;
         return self;
+    }
+
+    // A BVH BUILT HERE obeys MAX_DEPTH, has one parent per node, and indexes its own
+    // soup -- which is what lets Raycast walk it with a fixed stack and no bounds test in
+    // the hot loop. A node array read from a file obeys none of that on its own, so it is
+    // checked into that shape here, once, rather than re-tested per ray. A corrupt tile
+    // would otherwise be a stack overflow and an out-of-bounds triangle.
+    bool Bvh::Adopt(std::vector<Node> nodes, size_t triCount)
+    {
+        m_nodes = std::move(nodes);
+        m_maxDepth = 0;
+        if (m_nodes.empty())
+        {
+            return true;
+        }
+
+        std::vector<uint8_t> seen(m_nodes.size(), 0);
+        std::vector<std::pair<int32_t, int>> work;
+        work.reserve(MAX_DEPTH + 2);
+        work.push_back({0, 0});
+
+        while (!work.empty())
+        {
+            const auto entry = work.back();
+            work.pop_back();
+            const int32_t index = entry.first;
+            const int depth = entry.second;
+
+            // A second visit is a cycle or a shared child; either makes the walk
+            // unbounded. Build stops splitting at depth > MAX_DEPTH, so MAX_DEPTH + 1 is
+            // the deepest legitimate node and what the query stack is sized for.
+            if (index < 0 || size_t(index) >= m_nodes.size() || seen[size_t(index)] ||
+                depth > MAX_DEPTH + 1)
+            {
+                m_nodes.clear();
+                return false;
+            }
+            seen[size_t(index)] = 1;
+            m_maxDepth = std::max(m_maxDepth, depth);
+
+            const Node& n = m_nodes[size_t(index)];
+            if (n.left < 0)
+            {
+                if (size_t(n.first) + size_t(n.count) > triCount)
+                {
+                    m_nodes.clear();
+                    return false;
+                }
+                continue;
+            }
+            work.push_back({n.left, depth + 1});
+            work.push_back({n.right, depth + 1});
+        }
+
+        // Nodes nothing points at mean this array is not the tree it claims to be.
+        for (const uint8_t s : seen)
+        {
+            if (!s)
+            {
+                m_nodes.clear();
+                return false;
+            }
+        }
+        return true;
     }
 
     std::optional<float> Bvh::Raycast(const TriSoup& soup, const Vec3& o, const Vec3& d,

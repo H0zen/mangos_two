@@ -311,10 +311,11 @@ TEST(TileRoundTripPreservesTheBakedBvhAndItsQueries)
     }
     CHECK_EQ(mismatches, size_t(0));
 
-    const auto liquid = readWmo->LiquidLocal(Vec3{-2.f, -2.f, 0.f});
-    REQUIRE(liquid.has_value());
-    CHECK_EQ(liquid->z, 2.5f);
-    CHECK_EQ(liquid->entry, uint16_t(19));
+    std::vector<ICollisionModel::LocalLiquid> liquid;
+    readWmo->LiquidsLocal(Vec3{-2.f, -2.f, 0.f}, liquid);
+    REQUIRE(liquid.size() == size_t(1));
+    CHECK_EQ(liquid[0].z, 2.5f);
+    CHECK_EQ(liquid[0].entry, uint16_t(19));
 
     REQUIRE(back->instances[2].model->Kind() == ModelKind::Mesh);
     CHECK(back->instances[2].model->RaycastNearest(Vec3{0, 0, 20}, Vec3{0, 0, -1}, 100.f)
@@ -511,6 +512,93 @@ TEST(FusedTerrainServesTheBakedTile)
 
     // Off the map entirely.
     CHECK(terrain.ColumnAt(20000.f, 20000.f, 102.f, -10000.f).Empty());
+
+    std::remove(path.c_str());
+    FusedTerrain::SetTileDir(std::string());
+}
+
+// Existence is not readability, and this is the probe the server's startup check runs on
+// the starting areas. A tile truncated by a full disk, or left behind by an older format,
+// opens perfectly well: accepting it starts a server whose every height, liquid and
+// collision query answers nothing, on a map that reported itself present.
+TEST(FusedTerrainRejectsATileItCannotRead)
+{
+    const std::string dir = TempPath("staledir");
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    FusedTerrain::SetTileDir(dir);
+
+    const std::string stale = dir + "/" + TileFileName(7777, 32, 32);
+    const std::string empty = dir + "/" + TileFileName(7777, 33, 32);
+
+    // Right magic, a version this build does not read, and nothing after it.
+    if (std::FILE* f = std::fopen(stale.c_str(), "wb"))
+    {
+        const uint32_t magic = 0x32474E4D, version = 0xFFFFFFFFu;
+        std::fwrite(&magic, sizeof(magic), 1, f);
+        std::fwrite(&version, sizeof(version), 1, f);
+        std::fclose(f);
+    }
+    if (std::FILE* f = std::fopen(empty.c_str(), "wb"))
+    {
+        std::fclose(f);
+    }
+
+    CHECK(!FusedTerrain::HasTile(7777, 32, 32));
+    CHECK(!FusedTerrain::HasTile(7777, 33, 32));
+
+    std::remove(stale.c_str());
+    std::remove(empty.c_str());
+    FusedTerrain::SetTileDir(std::string());
+}
+
+TEST(SegmentGathersATileItOnlyClipsTheCornerOf)
+{
+    // A segment that crosses a tile for a fraction of its length. Stepping the line at
+    // half-tile samples steps straight over it, and a wall living only on that tile then
+    // does not exist for the ray -- sight through a building. Grid traversal enters
+    // every tile the segment touches, however briefly.
+    //
+    // Tile index grows as the coordinate shrinks: u = 32 - x / TILE_SIZE, tile = floor(u).
+    const std::string dir = TempPath("ddadir");
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+
+    const auto worldOf = [](float u) { return (32.f - u) * TILE_SIZE; };
+
+    // x runs four tiles while y crosses its boundary at t = 0.6, and x leaves tile 31 at
+    // t = 0.625 -- so tile (31, 32) owns 2.5% of the segment, about a tenth of a tile.
+    // The old sampler took ten samples at t = i/9, and none of them lands in that gap.
+    const float ax = worldOf(33.5f), ay = worldOf(33.24f);
+    const float bx = worldOf(29.5f), by = worldOf(32.84f);
+
+    // A wall across the segment, standing in the sliver: x is fixed at the point the
+    // segment is inside tile (31, 32), and it is wide and tall enough that only the
+    // TILE being gathered is in question, never whether the ray geometry lines up.
+    const float wallX = worldOf(31.06f);
+    TriSoup wall;
+    wall.verts = {{wallX, -560.f, -100.f},
+                  {wallX, -500.f, -100.f},
+                  {wallX, -500.f, 100.f},
+                  {wallX, -560.f, 100.f}};
+    wall.tris = {{0, 1, 2}, {0, 2, 3}};
+
+    TerrainTile tile;
+    tile.tx = 31;
+    tile.ty = 32;
+
+    StaticInstance inst;
+    inst.model = std::make_shared<CollisionModel>(std::move(wall));
+    inst.worldBounds.expand({wallX, -560.f, -100.f});
+    inst.worldBounds.expand({wallX, -500.f, 100.f});
+    tile.instances.push_back(std::move(inst));
+
+    const std::string path = dir + "/" + TileFileName(9997, 31, 32);
+    REQUIRE(WriteTile(tile, path));
+
+    FusedTerrain::SetTileDir(dir);
+    FusedTerrain terrain(9997);
+    CHECK(!terrain.IsInLineOfSight(ax, ay, 0.f, bx, by, 0.f, ModelIgnoreFlags::Nothing));
 
     std::remove(path.c_str());
     FusedTerrain::SetTileDir(std::string());

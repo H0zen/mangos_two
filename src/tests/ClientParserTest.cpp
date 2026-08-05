@@ -85,10 +85,17 @@ namespace
         hdr.PatchU32(0x00, flags);
         hdr.PatchU32(0x04, ix);
         hdr.PatchU32(0x08, iy);
-        hdr.PatchU32(0x14, 8 + 128);  // ofsMCVT, measured from the MCNK tag
+        // ofsMCVT, measured from the MCNK tag. Null mcvt builds a chunk that carries no
+        // heights at all -- the shape the parse must reject.
+        hdr.PatchU32(0x14, mcvt ? 8 + 128 : 0);
         hdr.PatchU32(0x34, areaId);
         hdr.PatchU32(0x3C, holes);
         hdr.PatchF32(0x70, baseZ);
+
+        if (!mcvt)
+        {
+            return hdr;
+        }
 
         Blob heights;
         for (int i = 0; i < 145; ++i)
@@ -128,6 +135,31 @@ namespace
         return lq;
     }
 
+    /// The other 255 chunks a tile has to have. ParseAdt requires every one of the 16x16
+    /// to supply heights -- the grid is zero-filled before the walk, so a gap is not a
+    /// hole in the tile but a block of flat ground at 0.0 -- so a fixture exercising ONE
+    /// chunk still has to be a whole tile around it.
+    ///
+    /// EMIT THIS BEFORE THE CHUNK UNDER TEST. V9 is 129x129 walked at a stride of 8, so
+    /// neighbouring chunks SHARE their border row of corners: chunk (x, 1) and chunk
+    /// (x, 2) both write row 16. Real neighbours store the same heights there and the
+    /// order cannot matter; flat padding does not, and written last it flattens the row
+    /// the test is about.
+    void PadTile(Blob& adt, uint32_t skipIx, uint32_t skipIy)
+    {
+        float flat[145] = {};
+        for (uint32_t iy = 0; iy < uint32_t(ADT_CHUNKS); ++iy)
+        {
+            for (uint32_t ix = 0; ix < uint32_t(ADT_CHUNKS); ++ix)
+            {
+                if (ix != skipIx || iy != skipIy)
+                {
+                    PutChunk(adt, "MCNK", MakeMcnk(ix, iy, 0.f, 0, 0, flat));
+                }
+            }
+        }
+    }
+
     struct Mh2oLayer
     {
         uint16_t entry = 13;
@@ -138,6 +170,12 @@ namespace
         uint64_t existsBits = ~uint64_t(0);
         bool withHeights = false;
         float heightBias = 0.f;
+        bool withAttributes = false;
+        uint64_t fishableBits = 0;
+        uint64_t deepBits = 0;
+        /// Non-zero overrides the attributes offset written to the table, for
+        /// exercising the parser's bounds guard against a malformed chunk.
+        uint32_t forceAttributesOfs = 0;
     };
 
     // One MH2O chunk carrying a single layer on chunk (iy,ix).
@@ -161,7 +199,13 @@ namespace
         const uint32_t afterInstance = instOfs + 24;
         uint32_t existsOfs = 0;
         uint32_t vertsOfs = 0;
+        uint32_t attrOfs = 0;
         uint32_t cursor = afterInstance;
+        if (l.withAttributes)
+        {
+            attrOfs = cursor;
+            cursor += 16;
+        }
         if (l.withExists)
         {
             existsOfs = cursor;
@@ -174,6 +218,17 @@ namespace
         tail.U32(existsOfs);
         tail.U32(vertsOfs);
 
+        if (l.withAttributes)
+        {
+            for (int i = 0; i < 8; ++i)
+            {
+                tail.U8(uint8_t((l.fishableBits >> (i * 8)) & 0xFF));
+            }
+            for (int i = 0; i < 8; ++i)
+            {
+                tail.U8(uint8_t((l.deepBits >> (i * 8)) & 0xFF));
+            }
+        }
         if (l.withExists)
         {
             for (int i = 0; i < 8; ++i)
@@ -195,6 +250,8 @@ namespace
         body.Append(tail);
         body.PatchU32(size_t(iy * 16 + ix) * 12 + 0, instOfs);
         body.PatchU32(size_t(iy * 16 + ix) * 12 + 4, 1);
+        body.PatchU32(size_t(iy * 16 + ix) * 12 + 8,
+                      l.forceAttributesOfs ? l.forceAttributesOfs : attrOfs);
         return body;
     }
 
@@ -255,6 +312,7 @@ TEST(AdtHeightGridIsNotTransposed)
     FillRamp(mcvt, 0.f);
 
     Blob adt;
+    PadTile(adt, 1, 2);
     PutChunk(adt, "MCNK", MakeMcnk(/*ix*/ 1, /*iy*/ 2, /*baseZ*/ 100.f, 0, 0, mcvt));
 
     AdtData d;
@@ -274,6 +332,7 @@ TEST(AdtHolesAndAreaId)
     FillRamp(mcvt, 0.f);
 
     Blob adt;
+    PadTile(adt, 3, 4);
     PutChunk(adt, "MCNK", MakeMcnk(3, 4, 0.f, 0x0021, 1519, mcvt));
 
     AdtData d;
@@ -293,6 +352,7 @@ TEST(AdtMh2oFlatLayerFillsWholeChunk)
     l.minHeight = 42.5f;
 
     Blob adt;
+    PadTile(adt, 1, 1);
     PutChunk(adt, "MCNK", MakeMcnk(1, 1, 0.f, 0, 0, mcvt));
     PutChunk(adt, "MH2O", MakeMh2o(1, 1, l));
 
@@ -328,6 +388,7 @@ TEST(AdtMh2oHonoursSubRectAndExistsBitmap)
     l.existsBits = 0x1;  // only cell (y=0,x=0) of the sub-rect exists
 
     Blob adt;
+    PadTile(adt, 0, 0);
     PutChunk(adt, "MCNK", MakeMcnk(0, 0, 0.f, 0, 0, mcvt));
     PutChunk(adt, "MH2O", MakeMh2o(0, 0, l));
 
@@ -353,6 +414,7 @@ TEST(AdtMh2oReadsPerVertexHeights)
     l.heightBias = 1000.f;
 
     Blob adt;
+    PadTile(adt, 0, 0);
     PutChunk(adt, "MCNK", MakeMcnk(0, 0, 0.f, 0, 0, mcvt));
     PutChunk(adt, "MH2O", MakeMh2o(0, 0, l));
 
@@ -379,16 +441,21 @@ TEST(AdtMh2oDepthOnlyLayerUsesMinHeight)
     l.withHeights = true;
 
     Blob adt;
+    PadTile(adt, 0, 0);
     PutChunk(adt, "MCNK", MakeMcnk(0, 0, 0.f, 0, 0, mcvt));
     PutChunk(adt, "MH2O", MakeMh2o(0, 0, l));
 
     AdtData d;
     REQUIRE(ParseAdt(adt.b, d));
     CHECK_EQ(d.liquidHeight[0], -7.25f);
-    CHECK_EQ(d.liquidNoLight[0], uint8_t(0));
+    CHECK_EQ(d.liquidDeepAttr[0], uint8_t(0));
 }
 
-TEST(AdtMh2oMarksTextureCoordLayersAsUnlit)
+// Absent attributes mean NOT deep -- wowdev ADT/v18: the offset "can be ommitted for
+// all-0". The vertex format says nothing about fatigue, which is what the guess this
+// replaced got wrong: it read "this layer stores texture coordinates" as "this water
+// is fatiguing", and marked ordinary lit ocean dark.
+TEST(AdtMh2oWithoutAttributesIsNotDeep)
 {
     float mcvt[145];
     FillRamp(mcvt, 0.f);
@@ -400,12 +467,116 @@ TEST(AdtMh2oMarksTextureCoordLayersAsUnlit)
     l.withHeights = true;
 
     Blob adt;
+    PadTile(adt, 0, 0);
     PutChunk(adt, "MCNK", MakeMcnk(0, 0, 0.f, 0, 0, mcvt));
     PutChunk(adt, "MH2O", MakeMh2o(0, 0, l));
 
     AdtData d;
     REQUIRE(ParseAdt(adt.b, d));
-    CHECK_EQ(d.liquidNoLight[0], uint8_t(1));
+    CHECK_EQ(d.liquidDeepAttr[0], uint8_t(0));
+}
+
+// A PARTIALLY set mask is the whole point of the bitmap, and the case an all-ones
+// fixture cannot fail on: a shore fatigues in its outer cells and not in the ones
+// against the beach. Reading the mask as a boolean drowns the shallows with it.
+TEST(AdtMh2oDeepAttributeIsPerCell)
+{
+    float mcvt[145];
+    FillRamp(mcvt, 0.f);
+
+    Mh2oLayer l;
+    l.withAttributes = true;
+    l.deepBits = 0xFFull;               // the chunk's first cell row, and nothing else
+
+    Blob adt;
+    PadTile(adt, 1, 1);
+    PutChunk(adt, "MCNK", MakeMcnk(1, 1, 0.f, 0, 0, mcvt));
+    PutChunk(adt, "MH2O", MakeMh2o(1, 1, l));
+
+    AdtData d;
+    REQUIRE(ParseAdt(adt.b, d));
+    for (int x = 0; x < 8; ++x)
+    {
+        CHECK_EQ(d.liquidDeepAttr[size_t(8) * ADT_GRID + (8 + x)], uint8_t(1));
+    }
+    for (int y = 1; y < 8; ++y)
+    {
+        for (int x = 0; x < 8; ++x)
+        {
+            CHECK_EQ(d.liquidDeepAttr[size_t(8 + y) * ADT_GRID + (8 + x)], uint8_t(0));
+        }
+    }
+}
+
+// The mask is indexed over the CHUNK's 8x8 cells, never over the instance's own
+// rectangle: an instance that covers a corner has to offset into it, or it reads
+// another cell's bit and fatigues the wrong water.
+TEST(AdtMh2oDeepAttributeIsIndexedOverTheChunk)
+{
+    float mcvt[145];
+    FillRamp(mcvt, 0.f);
+
+    Mh2oLayer l;
+    l.xOfs = 4;
+    l.yOfs = 4;
+    l.w = 4;
+    l.h = 4;
+    l.withAttributes = true;
+    l.deepBits = 1ull << (4 * 8 + 4);   // chunk cell (4,4): the instance's FIRST cell
+
+    Blob adt;
+    PadTile(adt, 1, 1);
+    PutChunk(adt, "MCNK", MakeMcnk(1, 1, 0.f, 0, 0, mcvt));
+    PutChunk(adt, "MH2O", MakeMh2o(1, 1, l));
+
+    AdtData d;
+    REQUIRE(ParseAdt(adt.b, d));
+    CHECK_EQ(d.liquidDeepAttr[size_t(8 + 4) * ADT_GRID + (8 + 4)], uint8_t(1));
+    CHECK_EQ(d.liquidDeepAttr[size_t(8 + 4) * ADT_GRID + (8 + 5)], uint8_t(0));
+    CHECK_EQ(d.liquidDeepAttr[size_t(8 + 5) * ADT_GRID + (8 + 4)], uint8_t(0));
+}
+
+// The fishable bitmap sits ahead of the deep one; reading the wrong half would flag
+// shallow fishing water as fatiguing ocean.
+TEST(AdtMh2oFishableAttributeIsNotDeep)
+{
+    float mcvt[145];
+    FillRamp(mcvt, 0.f);
+
+    Mh2oLayer l;
+    l.withAttributes = true;
+    l.fishableBits = ~uint64_t(0);
+    l.deepBits = 0;
+
+    Blob adt;
+    PadTile(adt, 1, 1);
+    PutChunk(adt, "MCNK", MakeMcnk(1, 1, 0.f, 0, 0, mcvt));
+    PutChunk(adt, "MH2O", MakeMh2o(1, 1, l));
+
+    AdtData d;
+    REQUIRE(ParseAdt(adt.b, d));
+    CHECK_EQ(d.liquidDeepAttr[size_t(8) * ADT_GRID + 8], uint8_t(0));
+}
+
+// An attributes offset past the end of the chunk must not be followed.
+TEST(AdtMh2oRejectsOutOfRangeAttributes)
+{
+    float mcvt[145];
+    FillRamp(mcvt, 0.f);
+
+    Mh2oLayer l;
+    l.withAttributes = true;
+    l.deepBits = ~uint64_t(0);
+    l.forceAttributesOfs = 0xF0000000;
+
+    Blob adt;
+    PadTile(adt, 1, 1);
+    PutChunk(adt, "MCNK", MakeMcnk(1, 1, 0.f, 0, 0, mcvt));
+    PutChunk(adt, "MH2O", MakeMh2o(1, 1, l));
+
+    AdtData d;
+    REQUIRE(ParseAdt(adt.b, d));
+    CHECK_EQ(d.liquidDeepAttr[size_t(8) * ADT_GRID + 8], uint8_t(0));
 }
 
 TEST(AdtMh2oRejectsOutOfRangeInstance)
@@ -419,6 +590,7 @@ TEST(AdtMh2oRejectsOutOfRangeInstance)
     body.PatchU32(4, 1);
 
     Blob adt;
+    PadTile(adt, 0, 0);
     PutChunk(adt, "MCNK", MakeMcnk(0, 0, 0.f, 0, 0, mcvt));
     PutChunk(adt, "MH2O", body);
 
@@ -437,6 +609,7 @@ TEST(AdtMh2oRejectsSubRectLeavingTheChunk)
     l.w = 8;  // 6 + 8 > 8
 
     Blob adt;
+    PadTile(adt, 0, 0);
     PutChunk(adt, "MCNK", MakeMcnk(0, 0, 0.f, 0, 0, mcvt));
     PutChunk(adt, "MH2O", MakeMh2o(0, 0, l));
 
@@ -460,6 +633,7 @@ TEST(AdtMclqFallbackTypesAndDarkWater)
 
     Blob mclq = MakeMclq(55.f, cells);
     Blob adt;
+    PadTile(adt, 0, 0);
     PutChunk(adt, "MCNK", MakeMcnk(0, 0, 0.f, 0, 0, mcvt, &mclq, 1u << 5));
 
     AdtData d;
@@ -476,16 +650,48 @@ TEST(AdtMclqFallbackTypesAndDarkWater)
     CHECK_EQ(d.liquidHeight[0], 55.f);
 }
 
-TEST(AdtStopsOnTruncatedChunk)
+TEST(AdtTruncatedChunkFailsTheParse)
 {
+    // A chunk declaring more bytes than the file holds. The walk stopping was never in
+    // doubt; SAYING SO is the change. Returning true here was safe only for as long as
+    // hasTerrain was the one thing a caller looked at -- a tile cut inside MODF or MDDF
+    // parsed "successfully" with its placements simply absent, and the tile was written.
     Blob adt;
     adt.U8('K'); adt.U8('N'); adt.U8('C'); adt.U8('M');
     adt.U32(0x7FFFFFFF);
     adt.Pad(16);
 
     AdtData d;
-    REQUIRE(ParseAdt(adt.b, d));
+    CHECK(!ParseAdt(adt.b, d));
     CHECK(!d.hasTerrain);
+}
+
+// A tile missing even one of its 256 chunks is not terrain: the height grid is
+// zero-filled before the walk, so the gap is a block of flat ground at 0.0 that
+// nothing downstream can tell from real terrain.
+TEST(AdtWithAMissingChunkIsNotTerrain)
+{
+    float mcvt[145];
+    FillRamp(mcvt, 0.f);
+
+    Blob adt;
+    PadTile(adt, 5, 6);                 // every chunk but (5,6)
+
+    AdtData d;
+    CHECK(!ParseAdt(adt.b, d));
+    CHECK(!d.hasTerrain);
+}
+
+// MCVT is the chunk's entire contribution to the heightmap; a chunk that carries none
+// used to be skipped, leaving 9x9 corners of flat 0.0 in an otherwise real tile.
+TEST(AdtChunkWithoutMcvtFailsTheParse)
+{
+    Blob adt;
+    PadTile(adt, 2, 3);
+    PutChunk(adt, "MCNK", MakeMcnk(2, 3, 0.f, 0, 0, nullptr));
+
+    AdtData d;
+    CHECK(!ParseAdt(adt.b, d));
 }
 
 TEST(WdtGridAndGlobalWmo)
@@ -650,7 +856,7 @@ TEST(WmoGroupKeepsDetailFacesThatAlsoCollide)
     Blob group = MakeMogpGroup(0, 15, 4242, nested);
 
     WmoGroupData g;
-    REQUIRE(ParseWmoGroup(group.b, 0, g));
+    REQUIRE(ParseWmoGroup(group.b, 0, g) == WmoGroupParse::Loaded);
     CHECK_EQ(g.groupWmoId, uint32_t(4242));
     CHECK_EQ(g.verts.size(), size_t(4));
     CHECK_EQ(g.tris.size(), size_t(2));
@@ -681,7 +887,7 @@ TEST(WmoGroupLiquidUsesWotlkRows)
         Blob group = MakeMogpGroup(e.mogpFlags, e.groupLiquid, 0, nested);
 
         WmoGroupData g;
-        REQUIRE(ParseWmoGroup(group.b, 0, g));
+        REQUIRE(ParseWmoGroup(group.b, 0, g) == WmoGroupParse::Loaded);
         REQUIRE(g.hasLiquid);
         CHECK_EQ(g.liquid.entry, e.entry);
         CHECK_EQ(g.liquid.tilesX, uint32_t(2));
@@ -697,7 +903,7 @@ TEST(WmoGroupLiquidTakesRawDbcIdWhenRootSaysSo)
     Blob group = MakeMogpGroup(0, 41, 0, nested);
 
     WmoGroupData g;
-    REQUIRE(ParseWmoGroup(group.b, 0x4, g));
+    REQUIRE(ParseWmoGroup(group.b, 0x4, g) == WmoGroupParse::Loaded);
     REQUIRE(g.hasLiquid);
     CHECK_EQ(g.liquid.entry, uint16_t(41));
 }
@@ -709,18 +915,49 @@ TEST(WmoGroupLiquidFallsBackToTileNibble)
     Blob group = MakeMogpGroup(0, 15, 0, nested);
 
     WmoGroupData g;
-    REQUIRE(ParseWmoGroup(group.b, 0, g));
+    REQUIRE(ParseWmoGroup(group.b, 0, g) == WmoGroupParse::Loaded);
     REQUIRE(g.hasLiquid);
     CHECK_EQ(g.liquid.entry, uint16_t(19));
 }
 
-TEST(WmoGroupWithoutGeometryOrLiquidIsRejected)
+TEST(WmoGroupWithoutGeometryOrLiquidIsEmptyNotMalformed)
 {
+    // The ordinary render-only, portal or ambient group. It is skipped, and the
+    // building it belongs to still loads -- which is the whole point of the
+    // distinction: most groups in any WMO land here.
     Blob nested;
     Blob group = MakeMogpGroup(0, 15, 0, nested);
 
     WmoGroupData g;
-    CHECK(!ParseWmoGroup(group.b, 0, g));
+    CHECK(ParseWmoGroup(group.b, 0, g) == WmoGroupParse::Empty);
+}
+
+TEST(WmoGroupWithoutMogpIsMalformed)
+{
+    // No MOGP at all: a group file IS a MOGP container, so this is a broken file and
+    // not a group with nothing in it. Answering Empty here bakes the building with a
+    // wing missing and reports it loaded.
+    Blob mopy;
+    mopy.U8(0x04); mopy.U8(0);
+    Blob group;
+    PutChunk(group, "MOPY", mopy);
+
+    WmoGroupData g;
+    CHECK(ParseWmoGroup(group.b, 0, g) == WmoGroupParse::Malformed);
+}
+
+TEST(WmoGroupWithAChunkPastTheEndIsMalformed)
+{
+    // A chunk declaring more bytes than the file holds. The walk used to break out and
+    // answer with whatever it had read so far, which for a truncated download is a
+    // group that looks merely empty.
+    Blob nested;
+    Blob group = MakeMogpGroup(0, 15, 0, nested);
+    group.U8('Y'); group.U8('P'); group.U8('O'); group.U8('M');
+    group.U32(0x7FFFFFFF);
+
+    WmoGroupData g;
+    CHECK(ParseWmoGroup(group.b, 0, g) == WmoGroupParse::Malformed);
 }
 
 TEST(WmoRootReadsHeaderAndDoodadNameOffsets)

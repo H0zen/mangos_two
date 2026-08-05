@@ -33,25 +33,26 @@ namespace world::terrain
 
         // Placement into the same world frame the terrain uses. The 180 degrees added to
         // the Z euler is the diag(-1,-1,1) axis flip, which is exactly a half-turn.
+        // Built through the three-argument constructor, never by assigning to .scale:
+        // that constructor exists to clamp a non-positive or non-finite scale, and MDDF
+        // stores scale as uint16/1024, which is legitimately 0 for a malformed record.
+        // worldToLocal divides by it, so the whole model quietly stops being hit by any
+        // ray instead of failing.
         Transform PlacementTransform(const Placement& p)
         {
-            Transform xf;
-            xf.pos = {MID - p.pos.z, MID - p.pos.x, p.pos.y};
-            xf.rot = Mat3::fromEuler(p.rotDeg.z * DEG2RAD, p.rotDeg.x * DEG2RAD,
-                                     (p.rotDeg.y + 180.0f) * DEG2RAD);
-            xf.scale = p.scale;
-            return xf;
+            return Transform({MID - p.pos.z, MID - p.pos.x, p.pos.y},
+                             Mat3::fromEuler(p.rotDeg.z * DEG2RAD, p.rotDeg.x * DEG2RAD,
+                                             (p.rotDeg.y + 180.0f) * DEG2RAD),
+                             p.scale);
         }
 
         // A WDT global WMO's MODF is already in world coordinates, so no re-centring.
         Transform GlobalWmoTransform(const Placement& p)
         {
-            Transform xf;
-            xf.pos = {p.pos.z, p.pos.x, p.pos.y};
-            xf.rot = Mat3::fromEuler(p.rotDeg.z * DEG2RAD, p.rotDeg.x * DEG2RAD,
-                                     (p.rotDeg.y + 180.0f) * DEG2RAD);
-            xf.scale = p.scale;
-            return xf;
+            return Transform({p.pos.z, p.pos.x, p.pos.y},
+                             Mat3::fromEuler(p.rotDeg.z * DEG2RAD, p.rotDeg.x * DEG2RAD,
+                                             (p.rotDeg.y + 180.0f) * DEG2RAD),
+                             p.scale);
         }
 
         // MODD's quaternion is authored against the M2's RAW model space, but M2Parser
@@ -66,11 +67,10 @@ namespace world::terrain
             r.m[4] = -r.m[4];
             r.m[7] = -r.m[7];
 
-            Transform xf;
-            xf.pos = wmoXf.localToWorld(d.pos);
-            xf.rot = Mat3::mulm(wmoXf.rot, r);
-            xf.scale = wmoXf.scale * d.scale;
-            return xf;
+            // The PRODUCT is what gets clamped: either factor alone can be fine while
+            // the product underflows to zero.
+            return Transform(wmoXf.localToWorld(d.pos), Mat3::mulm(wmoXf.rot, r),
+                             wmoXf.scale * d.scale);
         }
     }
 
@@ -116,13 +116,29 @@ namespace world::terrain
         }
 
         const std::string path = WdtPath(mapId);
+        if (path.empty())
+        {
+            return nullptr;                             // no directory: never had terrain
+        }
+
+        // ABSENT AND BROKEN ARE DIFFERENT ANSWERS, and this function can only give one of
+        // them. Map.dbc lists identities that never had a WDT and BakeMap is right to pass
+        // over those; a WDT that IS there and will not read or parse is a truncated or
+        // stale-format client, and collapsing it to the same nullptr let a full extraction
+        // drop that map's entire tile and nav cache and still exit 0.
         std::vector<uint8_t> bytes;
         WdtData wdt;
-        if (path.empty() || !m_archive.Read(path, bytes) || !ParseWdt(bytes, wdt))
+        if (!m_archive.Read(path, bytes) || !ParseWdt(bytes, wdt))
         {
+            m_wdtBroken.insert(mapId);
             return nullptr;
         }
         return &m_wdtCache.emplace(mapId, std::move(wdt)).first->second;
+    }
+
+    bool MpqTileSource::WdtUnreadable(uint32_t mapId) const
+    {
+        return m_wdtBroken.find(mapId) != m_wdtBroken.end();
     }
 
     void MpqTileSource::AttachWmoDoodads(const Placement& p, const std::string& wmoPath,
@@ -209,11 +225,14 @@ namespace world::terrain
                 const LiquidKind kind =
                     world::ClassifyLiquid(tile->liquidEntry[i], m_liquidTypes);
                 tile->liquidKind[i] = uint8_t(kind);
-                // Dark water is the MCLQ per-cell bit, or an ocean layer that shipped no
-                // light map -- the rule the reference extractor has always used.
+                // Dark water is the MCLQ per-cell bit (pre-WotLK tiles), or an ocean cell
+                // whose MH2O chunk carries the DEEP ATTRIBUTE. It is a real 8x8 mask in
+                // mh2o_chunk_attributes, not a property of the vertex format: the former
+                // ocean-without-light-map guess read "this layer stores texture
+                // coordinates" as "this water is fatiguing".
                 tile->liquidDeep[i] =
                     (adt.liquidDark[i] ||
-                     (kind == LiquidKind::Ocean && adt.liquidNoLight[i]))
+                     (kind == LiquidKind::Ocean && adt.liquidDeepAttr[i]))
                         ? 1
                         : 0;
             }

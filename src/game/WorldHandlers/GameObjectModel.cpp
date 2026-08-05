@@ -85,7 +85,7 @@ float GameObjectModel::SegmentHitFraction(const Vector3& a, const Vector3& b) co
 {
     if (!m_collidable || !m_model)
     {
-        return 2.0f;
+        return world::terrain::NO_HIT_FRACTION;
     }
 
     const Vector3 originLocal = m_xf.worldToLocal(a);
@@ -98,7 +98,7 @@ float GameObjectModel::SegmentHitFraction(const Vector3& a, const Vector3& b) co
             return *t;
         }
     }
-    return 2.0f;
+    return world::terrain::NO_HIT_FRACTION;
 }
 
 void GameObjectModel::AddSurfaces(float x, float y, float zTop, float zBottom,

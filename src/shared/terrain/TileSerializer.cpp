@@ -19,6 +19,36 @@ namespace world::terrain
         constexpr uint32_t MAX_MODELS = 1u << 20;
         constexpr uint32_t MAX_INSTANCES = 1u << 22;
 
+        /// Every triangle indexes the soup's own vertices. TriSoup::At does no checking,
+        /// by design -- it is the innermost thing in a raycast -- so the file has to be
+        /// proved right here instead.
+        bool SoupIndicesInRange(const TriSoup& soup)
+        {
+            const uint32_t n = uint32_t(soup.verts.size());
+            for (const auto& t : soup.tris)
+            {
+                if (t[0] >= n || t[1] >= n || t[2] >= n)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        bool Finite(const Vec3& v) { return v.isFinite(); }
+
+        bool Finite(const Mat3& m)
+        {
+            for (const float f : m.m)
+            {
+                if (!::Geometry::isFinite(f))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
         // A count is only believable if the file still holds that many elements. A fixed
         // ceiling is not enough: it still lets a corrupt header reserve hundreds of
         // megabytes before the short read is noticed, and on an overcommitting kernel
@@ -119,6 +149,26 @@ namespace world::terrain
                      RPod(f, g.liquid.corner) && RPod(f, g.liquid.entry) &&
                      RPod(f, g.liquid.kind) && RVec(f, g.liquid.heights) &&
                      RVec(f, g.liquid.flags);
+
+                // The corner grid is indexed at a stride of tilesX+1 by every reader, so
+                // a count that disagrees with the dimensions is not a smaller surface --
+                // it is a read off the end of the vector on the first query over it.
+                const size_t corners =
+                    (size_t(g.liquid.tilesX) + 1) * (size_t(g.liquid.tilesY) + 1);
+                if (ok && g.liquid.heights.size() != corners)
+                {
+                    return false;
+                }
+
+                // The flags grid decides which tiles are DRY. GroupLiquidAt reads it as
+                // `fi < flags.size() && ...`, so a short or empty array does not fail --
+                // it silently answers "not dry" for every cell past the end and floods
+                // rooms that the client marks as having no water in them.
+                const size_t cells = size_t(g.liquid.tilesX) * g.liquid.tilesY;
+                if (ok && g.liquid.flags.size() != cells)
+                {
+                    return false;
+                }
             }
             return ok;
         }
@@ -254,6 +304,26 @@ namespace world::terrain
         tile->isGlobalWmo = globalWmo != 0;
         tile->hasLiquid = hasLiquid != 0;
 
+        // A grid is present EXACTLY when its flag says so, and when present it is exactly
+        // the size every reader indexes it at -- TerrainHeight walks v9 at a stride of
+        // V9_SIDE and guards only against empty. "Fits in the remaining file" was a
+        // truncation check, never a shape one; and accepting empty unconditionally lets a
+        // tile DECLARE terrain and carry none, pass the startup probe, then answer every
+        // height query with nothing.
+        constexpr size_t CORNERS = size_t(V9_SIDE) * V9_SIDE;
+        constexpr size_t CELLS = size_t(GRID_PER_TILE) * GRID_PER_TILE;
+        auto grid = [](const auto& v, bool present, size_t n)
+        {
+            return v.size() == (present ? n : size_t(0));
+        };
+        ok = ok && grid(tile->v9, tile->hasTerrain, CORNERS) &&
+             grid(tile->v8, tile->hasTerrain, CELLS) &&
+             grid(tile->liquidHeight, tile->hasLiquid, CORNERS) &&
+             grid(tile->liquidShow, tile->hasLiquid, CELLS) &&
+             grid(tile->liquidKind, tile->hasLiquid, CELLS) &&
+             grid(tile->liquidEntry, tile->hasLiquid, CELLS) &&
+             grid(tile->liquidDeep, tile->hasLiquid, CELLS);
+
         uint32_t nModels = 0;
         ok = ok && RPod(f, nModels) && nModels <= MAX_MODELS;
 
@@ -286,13 +356,13 @@ namespace world::terrain
                 }
 
                 std::vector<uint16_t> triGroup;
+                Bvh bvh;
                 ok = ok && RVec(f, soup.verts) && RVec(f, soup.tris) &&
                      RVec(f, triGroup) && RVec(f, nodes) &&
-                     triGroup.size() == soup.tris.size();
+                     triGroup.size() == soup.tris.size() && SoupIndicesInRange(soup) &&
+                     bvh.Adopt(std::move(nodes), soup.tris.size());
                 if (ok)
                 {
-                    Bvh bvh;
-                    bvh.Adopt(std::move(nodes));
                     models[i] = std::make_shared<WmoModel>(std::move(soup),
                                                            std::move(triGroup),
                                                            std::move(groups), rootId,
@@ -301,11 +371,12 @@ namespace world::terrain
             }
             else if (kind == uint8_t(ModelKind::Mesh))
             {
-                ok = RVec(f, soup.verts) && RVec(f, soup.tris) && RVec(f, nodes);
+                Bvh bvh;
+                ok = RVec(f, soup.verts) && RVec(f, soup.tris) && RVec(f, nodes) &&
+                     SoupIndicesInRange(soup) &&
+                     bvh.Adopt(std::move(nodes), soup.tris.size());
                 if (ok)
                 {
-                    Bvh bvh;
-                    bvh.Adopt(std::move(nodes));
                     models[i] = std::make_shared<CollisionModel>(std::move(soup),
                                                                  std::move(bvh));
                 }
@@ -327,6 +398,22 @@ namespace world::terrain
                  RPod(f, inst.worldBounds.hi) && RPod(f, idx) && RPod(f, inst.adtId);
             if (ok)
             {
+                // THE POSE ARRIVES AS RAW PODS, which walks straight past the Transform
+                // constructor whose whole purpose is this clamp -- so the baker clamping
+                // a zero or non-finite scale fixes only half of it. worldToLocal divides
+                // by scale, and every comparison against the resulting NaN is false, so
+                // the model is silently never hit rather than failing.
+                if (!(inst.xf.scale > 0.f) || !::Geometry::isFinite(inst.xf.scale))
+                {
+                    inst.xf.scale = 1.f;
+                }
+                if (!Finite(inst.xf.pos) || !Finite(inst.xf.rot) ||
+                    !Finite(inst.worldBounds.lo) || !Finite(inst.worldBounds.hi))
+                {
+                    ok = false;
+                    break;
+                }
+
                 if (idx < models.size())
                 {
                     inst.model = models[idx];

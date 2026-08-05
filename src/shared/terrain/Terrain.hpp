@@ -21,8 +21,23 @@ namespace world::terrain
 
     constexpr int FusedTerrainGridCount = 64;
 
+    /// What a segment query answers with when nothing was hit. Any value past 1.0 says
+    /// "beyond the far end"; naming it keeps every producer and every test on one word.
+    constexpr float NO_HIT_FRACTION = 2.0f;
+
     inline float GridCoord(float c) { return GRID_PER_TILE * (MAP_CENTER - c / TILE_SIZE); }
-    inline int TileIndex(float c) { return static_cast<int>(GridCoord(c)) >> 7; }
+
+    /// The grid is half-open everywhere except its far edge, which is a real coordinate:
+    /// c = -32 * TILE_SIZE lands exactly on 8192 and shifts to 64, one past the last
+    /// tile, so the extreme corner of a 64x64 map answered "no tile" instead of the tile
+    /// it is the corner of. Only that exact boundary folds -- anything further out stays
+    /// out of range, because a query off the map must not be served the edge tile.
+    inline int TileIndex(float c)
+    {
+        const int g = static_cast<int>(GridCoord(c));
+        return g == GRID_PER_TILE * FusedTerrainGridCount ? FusedTerrainGridCount - 1
+                                                          : (g >> 7);
+    }
 
     enum class LiquidKind : uint8_t
     {
@@ -73,7 +88,12 @@ namespace world::terrain
         // Mirrors the reference GridMap: four triangles meeting at the V8 centre.
         std::optional<float> TerrainHeight(float x, float y) const
         {
-            if (!hasTerrain || v8.empty() || v9.empty())
+            // SIZE, not emptiness. V9 is indexed at (ix + 1, iy + 1) with a stride of
+            // V9_SIDE, so a grid that is present but short reads off the end -- ReadTile
+            // enforces the shape, and this is the same check for a tile built in memory
+            // by a test or a tool that never went through it.
+            if (!hasTerrain || v9.size() != size_t(V9_SIDE) * V9_SIDE ||
+                v8.size() != size_t(GRID_PER_TILE) * GRID_PER_TILE)
             {
                 return std::nullopt;
             }
@@ -132,7 +152,18 @@ namespace world::terrain
 
         std::optional<LiquidInfo> LiquidAt(float x, float y) const
         {
-            if (!hasLiquid || liquidHeight.empty() || liquidShow.empty())
+            // Same rule as TerrainHeight: the corner grid is walked at (ix + 1, iy + 1),
+            // and the three per-cell arrays are indexed unconditionally below whenever
+            // they are non-empty, so each has to be the full grid or absent entirely.
+            constexpr size_t CORNERS = size_t(V9_SIDE) * V9_SIDE;
+            constexpr size_t CELLS = size_t(GRID_PER_TILE) * GRID_PER_TILE;
+            const auto sized = [](const auto& v, size_t n)
+            {
+                return v.empty() || v.size() == n;
+            };
+            if (!hasLiquid || liquidHeight.size() != CORNERS ||
+                liquidShow.size() != CELLS || !sized(liquidKind, CELLS) ||
+                !sized(liquidEntry, CELLS) || !sized(liquidDeep, CELLS))
             {
                 return std::nullopt;
             }

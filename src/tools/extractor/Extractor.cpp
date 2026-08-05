@@ -234,18 +234,23 @@ namespace
         return true;
     }
 
+    // Answers with the number of databases that could NOT be written, the same way
+    // BakeMap answers with the tiles it could not bake and for the same reason: the
+    // installer deletes the old data before running this, so a run that copies half the
+    // DBCs and exits 0 leaves a server that starts and is wrong.
     int ExtractDbc(StormLibArchive& mpq, const std::string& dest,
                    const std::string& locale)
     {
         std::error_code ec;
         std::filesystem::create_directories(dest, ec);
 
-        int written = 0;
+        int written = 0, failed = 0;
         for (const std::string& name : mpq.FindFiles("DBFilesClient\\*.dbc"))
         {
             std::vector<uint8_t> bytes;
             if (!mpq.Read(name, bytes))
             {
+                ++failed;
                 continue;
             }
             const size_t slash = name.find_last_of('\\');
@@ -259,12 +264,14 @@ namespace
             std::FILE* f = std::fopen((dest + "/" + leaf).c_str(), "wb");
             if (!f)
             {
+                ++failed;
                 continue;
             }
             const bool ok = bytes.empty() ||
                             std::fwrite(bytes.data(), 1, bytes.size(), f) == bytes.size();
             std::fclose(f);
             written += ok ? 1 : 0;
+            failed += ok ? 0 : 1;
         }
         // The build stamp. The server reads it to check the DBCs came from a client it
         // supports -- extract from the wrong expansion and the column layouts differ
@@ -324,20 +331,38 @@ namespace
             g_console.Warn("  no component.wow-<locale>.txt in the client; the server "
                            "cannot check the DBC build");
         }
-        return written;
+
+        // Writing nothing at all is a failure with no failed file behind it -- an empty
+        // DBFilesClient glob, or a destination that could not be created.
+        if (!written)
+        {
+            g_console.Error("dbc: nothing written to " + dest);
+            ++failed;
+        }
+        return failed;
     }
 
     // Every collidable game-object model, keyed by GameObjectDisplayInfo id: doors,
     // lifts, bridges. Written as ordinary one-instance tiles at identity, so the runtime
     // reads them with the same code that reads terrain.
-    void BakeGoModels(WmoLoader& wmo, M2Loader& m2,
-                      const world::GameObjectDisplayInfoStore& display,
-                      const std::string& dest)
+    /// @return the number of models that could NOT be written -- the same contract
+    ///         ExtractDbc and BakeMap answer with, and for the same reason: the installer
+    ///         deletes the installed data before this runs, so a stage that half-writes
+    ///         and exits 0 leaves the runtime with no collision for doors, bridges and
+    ///         lifts, and nothing left to restore.
+    int BakeGoModels(WmoLoader& wmo, M2Loader& m2,
+                     const world::GameObjectDisplayInfoStore& display,
+                     const std::string& dest)
     {
         std::error_code ec;
         std::filesystem::create_directories(dest, ec);
+        if (ec)
+        {
+            g_console.Error("gomodels: cannot create " + dest + ": " + ec.message());
+            return 1;
+        }
 
-        int written = 0, empty = 0;
+        int written = 0, empty = 0, failed = 0;
         for (const auto& entry : display.All())
         {
             std::shared_ptr<const ICollisionModel> model =
@@ -363,15 +388,24 @@ namespace
             inst.worldBounds = model->Bounds();
             tile.instances.push_back(std::move(inst));
 
-            if (WriteTile(tile, dest + "/" + GoModelFileName(entry.first)))
+            const std::string path = dest + "/" + GoModelFileName(entry.first);
+            if (WriteTile(tile, path))
             {
                 ++written;
             }
+            else
+            {
+                ++failed;
+                g_console.Error("gomodels: cannot write " + path);
+            }
         }
+
         char msg[512];
-        std::snprintf(msg, sizeof(msg), "gomodels: %d written, %d without collision",
-                      written, empty);
-        g_console.Success(msg);
+        std::snprintf(msg, sizeof(msg),
+                      "gomodels: %d written, %d without collision, %d FAILED",
+                      written, empty, failed);
+        if (failed) { g_console.Error(msg); } else { g_console.Success(msg); }
+        return failed;
     }
 
     void NavProgress(void* ctx, uint32_t, const char* label, size_t done, size_t total)
@@ -483,10 +517,11 @@ namespace
     //
     // The instance keeps its identity placement. Model space IS the deck, and there is no
     // world pose to compose with.
+    // Answers with the hulls it could NOT write, like every other stage here.
     int BakeVesselMaps(const std::string& goDir, const std::string& tileDir,
                        const std::vector<VesselMap>& vessels)
     {
-        int written = 0;
+        int written = 0, failed = 0;
         for (const VesselMap& v : vessels)
         {
             auto tile = ReadTile(goDir + "/" + GoModelFileName(v.displayId));
@@ -497,6 +532,7 @@ namespace
                               "vessels: no baked collision for display id %u",
                               v.displayId);
                 g_console.Error(msg);
+                ++failed;
                 continue;
             }
 
@@ -515,6 +551,7 @@ namespace
                 std::snprintf(msg, sizeof(msg),
                               "vessels: could not write map %u", v.mapId);
                 g_console.Error(msg);
+                ++failed;
             }
             Tick();
         }
@@ -523,7 +560,7 @@ namespace
         std::snprintf(msg, sizeof(msg), "vessels: %d hull maps -> %s", written,
                       tileDir.c_str());
         g_console.Success(msg);
-        return written;
+        return failed;
     }
 
     bool BakeNav(const Options& opt, const std::string& tileDir)
@@ -560,28 +597,50 @@ namespace
 
     // One map's tiles. A map is either an ADT grid or a single global WMO; both end up
     // as the same payload, so the runtime has nothing to reconcile.
-    void BakeMap(MpqTileSource& source, uint32_t mapId, const std::string& name,
-                 const std::string& dest)
+    // Answers with the number of tiles that could NOT be baked, because that number has to
+    // reach the exit code: the installer deletes the installed data BEFORE running this, so
+    // a partial bake reported as success leaves a world with holes in it and nothing left
+    // to restore. A map with no WDT at all is not a failure -- Map.dbc lists identities
+    // that never had terrain.
+    int BakeMap(MpqTileSource& source, uint32_t mapId, const std::string& name,
+                const std::string& dest)
     {
         const WdtData* wdt = source.Wdt(mapId);
         if (!wdt)
         {
-            return;
+            if (source.WdtUnreadable(mapId))
+            {
+                char msg[256];
+                std::snprintf(msg, sizeof(msg),
+                              "  map %4u %-24s WDT FAILED to read or parse", mapId,
+                              name.c_str());
+                g_console.Error(msg);
+                return 1;
+            }
+            return 0;
         }
 
         if (!wdt->HasAnyAdt())
         {
             auto tile = source.Load(mapId, 0, 0);
-            if (tile && tile->isGlobalWmo)
+            const bool baked = tile && tile->isGlobalWmo &&
+                               WriteTile(*tile, dest + "/" + GlobalWmoFileName(mapId));
+
+            // The WDT ITSELF says whether this map is one global WMO, so a map that
+            // declares one and could not be baked -- a missing or malformed model -- is a
+            // failure, not an absence. Reading that from the loaded tile instead would
+            // have called the failure "nothing to do here" and exited 0 on a map with no
+            // terrain at all.
+            if (!wdt->hasGlobalWmo)
             {
-                const bool ok =
-                    WriteTile(*tile, dest + "/" + GlobalWmoFileName(mapId));
-                char msg[256];
-                std::snprintf(msg, sizeof(msg), "  map %4u %-24s global WMO %s", mapId,
-                              name.c_str(), ok ? "ok" : "FAILED");
-                if (ok) { g_console.Detail(msg); } else { g_console.Error(msg); }
+                return 0;
             }
-            return;
+
+            char msg[256];
+            std::snprintf(msg, sizeof(msg), "  map %4u %-24s global WMO %s", mapId,
+                          name.c_str(), baked ? "ok" : "FAILED");
+            if (baked) { g_console.Detail(msg); } else { g_console.Error(msg); }
+            return baked ? 0 : 1;
         }
 
         size_t expected = 0;
@@ -624,6 +683,7 @@ namespace
         std::snprintf(msg, sizeof(msg), "  map %4u %-24s %5d tiles%s", mapId,
                       name.c_str(), written, failed ? " (SOME FAILED)" : "");
         if (failed) { g_console.Warn(msg); } else { g_console.Detail(msg); }
+        return failed;
     }
 }
 
@@ -699,13 +759,16 @@ int main(int argc, char** argv)
         {
             opt.mapFilter = choice.mapFilter;
         }
+        // Normalised HERE as well as above: the pass before the menu only ever saw the
+        // command line's paths, so anything typed into the menu kept whatever separators
+        // it was typed with.
         if (!choice.src.empty())
         {
-            opt.src = choice.src;
+            opt.src = ExtractorConsole::ToUnixPath(choice.src);
         }
         if (!choice.dest.empty())
         {
-            opt.dest = choice.dest;
+            opt.dest = ExtractorConsole::ToUnixPath(choice.dest);
         }
     }
     else if (!opt.named)
@@ -769,18 +832,28 @@ int main(int argc, char** argv)
     {
         if (!opt.vessels)
         {
-            return;
+            return true;
         }
         std::error_code ec;
         std::filesystem::create_directories(tileDir, ec);
         g_console.SetStage("vessels");
-        BakeVesselMaps(opt.dest + "/gomodels", tileDir, ReadVesselMaps(opt.vesselList));
+
+        // An empty list is not an error -- `all` turns this stage on and the shipped
+        // list may legitimately name nothing yet -- but a hull that was ASKED for and
+        // could not be written is, and the result used to be dropped on the floor.
+        const std::vector<VesselMap> list = ReadVesselMaps(opt.vesselList);
+        if (list.empty())
+        {
+            g_console.Warn("vessels: " + opt.vesselList +
+                           " names no hulls -- no vessel maps written");
+            return true;
+        }
+        return BakeVesselMaps(opt.dest + "/gomodels", tileDir, list) == 0;
     };
 
     if (!opt.dbc && !opt.tiles && !opt.goModels)
     {
-        BakeVessels();
-        const bool ok = BakeNav(opt, tileDir);
+        const bool ok = BakeVessels() && BakeNav(opt, tileDir);
         g_console.SetStage("done");
         g_console.Progress(-1);
         g_console.Stop();
@@ -803,10 +876,11 @@ int main(int argc, char** argv)
         g_console.Log(msg);
     }
 
+    int dbcFailed = 0;
     if (opt.dbc)
     {
         g_console.SetStage("dbc");
-        ExtractDbc(mpq, opt.dest + "/dbc", opt.locale);
+        dbcFailed += ExtractDbc(mpq, opt.dest + "/dbc", opt.locale);
     }
 
     // EVERY OTHER LANGUAGE THE CLIENT CARRIES. Only the DBC set is locale-dependent, so
@@ -832,16 +906,25 @@ int main(int argc, char** argv)
             }
 
             g_console.SetLocale(loc);
-            ExtractDbc(other, opt.dest + "/dbc/" + loc, loc);
+            dbcFailed += ExtractDbc(other, opt.dest + "/dbc/" + loc, loc);
         }
         g_console.SetLocale(opt.locale);
     }
 
+    if (dbcFailed)
+    {
+        char msg[256];
+        std::snprintf(msg, sizeof(msg),
+                      "dbc: %d database(s) could not be written -- the install is "
+                      "INCOMPLETE", dbcFailed);
+        g_console.Error(msg);
+        g_console.Stop();
+        return 1;
+    }
 
     if (!opt.tiles && !opt.goModels)
     {
-        BakeVessels();
-        const bool ok = BakeNav(opt, tileDir);
+        const bool ok = BakeVessels() && BakeNav(opt, tileDir);
         g_console.SetStage("done");
         g_console.Progress(-1);
         g_console.Stop();
@@ -868,36 +951,76 @@ int main(int argc, char** argv)
         {
             WmoLoader wmo(mpq, &liquids);
             M2Loader m2(mpq);
-            BakeGoModels(wmo, m2, display, opt.dest + "/gomodels");
+            const int goFailed =
+                BakeGoModels(wmo, m2, display, opt.dest + "/gomodels");
+
+            // The DBC half of this stage already aborts; the write half used to count a
+            // failed tile as one simply not written and fall through green.
+            if (goFailed)
+            {
+                char msg[256];
+                std::snprintf(msg, sizeof(msg),
+                              "gomodels: %d model(s) could not be written -- the install "
+                              "is INCOMPLETE", goFailed);
+                g_console.Error(msg);
+                g_console.Stop();
+                return 1;
+            }
         }
         else
         {
-            g_console.Error("GameObjectDisplayInfo.dbc could not be read");
+            // Nothing below this reads the stage's result, so falling through left
+            // gomodels/ empty behind a clean exit 0 -- and every door, lift and bridge
+            // in the world is a gomodel.
+            g_console.Error("GameObjectDisplayInfo.dbc could not be read -- no game "
+                            "object models can be baked");
+            g_console.Stop();
+            return 1;
         }
     }
 
-    BakeVessels();
+    const bool vesselsOk = BakeVessels();
 
     if (!opt.tiles)
     {
-        const bool ok = BakeNav(opt, tileDir);
+        const bool ok = vesselsOk && BakeNav(opt, tileDir);
         g_console.SetStage("done");
         g_console.Progress(-1);
         g_console.Stop();
         return ok ? 0 : 1;
     }
 
+    if (!vesselsOk)
+    {
+        g_console.Stop();
+        return 1;
+    }
+
     g_console.SetStage("tiles");
     MpqTileSource source(mpq, &maps, &liquids);
     g_console.Log("tiles -> " + tileDir);
 
+    int failedTiles = 0;
     for (const auto& entry : maps.All())
     {
         if (opt.mapFilter >= 0 && uint32_t(opt.mapFilter) != entry.first)
         {
             continue;
         }
-        BakeMap(source, entry.first, entry.second, tileDir);
+        failedTiles += BakeMap(source, entry.first, entry.second, tileDir);
+    }
+
+    // The navmesh is deliberately NOT built over a tile set known to be incomplete: it
+    // would come out looking finished, with holes exactly where the terrain is missing.
+    if (failedTiles)
+    {
+        char msg[256];
+        std::snprintf(msg, sizeof(msg),
+                      "tiles: %d could not be baked -- the cache under %s is INCOMPLETE",
+                      failedTiles, tileDir.c_str());
+        g_console.Error(msg);
+        g_console.Stop();
+        return 1;
     }
 
     if (!BakeNav(opt, tileDir))
