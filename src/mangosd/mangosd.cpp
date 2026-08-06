@@ -358,8 +358,8 @@ int main(int argc, char** argv)
     if (consoleStyle != "plain" &&
         MaNGOS::Console::ConsoleUI::Instance().Start("MaNGOS Two", "WotLK 3.3.5a"))
     {
-        MaNGOS::Console::ConsoleUI::Instance().SetHeaderRight(
-            std::string("realm ") + std::to_string(realmID));
+        // No realm stamp here: realmID is still 0 until Master::_StartDB reads the config,
+        // which happens after this. It sets the header itself, with the name.
         MaNGOS::Console::ConsoleUI::Instance().SetHint(
             "PgUp/PgDn scroll \xC2\xB7 Ctrl+L redraw");
         MaNGOS::Console::ConsoleUI::Instance().SetKeyEcho(
