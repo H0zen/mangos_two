@@ -510,7 +510,7 @@ bool TransportMap::Board(Player* passenger, float x, float y, float z, float o, 
 
     // ALREADY ON THE WATER SHE SAILS: there is no world map to change, so this is the
     // walk-aboard case and Embark is the whole of it -- the same primitive
-    // HandleMoverRelocation uses, and the only one 00 has at all.
+    // HandleMoverRelocation uses when a man simply steps over the rail.
     //
     // Teleporting anyway asks TeleportTo for a port to the map he is standing on. Its
     // near branch is `GetMapId() == mapid && !m_transport`, and m_transport was set six
