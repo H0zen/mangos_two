@@ -884,15 +884,18 @@ namespace world::nav
                 return false;
             }
 
-            // Every walkable poly must carry a flag or the query filter rejects all of
-            // them; the area id is what the server's filter then reads.
+            // dtQueryFilter tests poly->FLAGS, never the area -- the area only prices a
+            // polygon. So the NAV_* bit has to be carried into the flags verbatim:
+            // collapsing it to 1 stamps NAV_GROUND onto water, magma and slime, which
+            // both bars a swim-only creature from its own water and walks land creatures
+            // across lava.
             for (int i = 0; i < merged->npolys; ++i)
             {
                 if (merged->areas[i] == RC_WALKABLE_AREA)
                 {
                     merged->areas[i] = NAV_GROUND;
                 }
-                merged->flags[i] = merged->areas[i] ? 1 : 0;
+                merged->flags[i] = merged->areas[i];
             }
 
             const std::vector<OffMeshLink> links =
@@ -965,6 +968,14 @@ namespace world::nav
             const bool ok = WriteFile(mb.outDir + "/" + name, &header, sizeof(header),
                                       navData, size_t(navDataSize));
             dtFree(navData);
+
+            // An I/O failure AFTER the mesh was built is an error, not an empty tile.
+            // Returning false alone puts it in the same bucket as open ocean, which the
+            // worker does not count, so a full disk produced a partial navmesh at exit 0.
+            if (!ok)
+            {
+                tileError = true;
+            }
             return ok;
         }
     }
@@ -1054,9 +1065,13 @@ namespace world::nav
 
         char name[32];
         std::snprintf(name, sizeof(name), "%04u.mmap", mapId);
+        // NEGATIVE, not zero: BakeAll treats zero as a map that legitimately produced no
+        // tiles and keeps going, so returning it here finishes a nav bake with exit 0 and
+        // no .mmap for the map -- the server then has no navmesh at all for it.
         if (!WriteFile(m_outDir + "/" + name, &params, sizeof(params), nullptr, 0))
         {
-            return 0;
+            std::fprintf(stderr, "nav: map %u failed: cannot write %s\n", mapId, name);
+            return -1;
         }
 
         MapBake mb;
@@ -1207,22 +1222,30 @@ namespace world::nav
             std::snprintf(label, sizeof(label), "map %u  [%zu/%zu]", mapId, done + 1,
                           mapCount);
 
+            // The map is in this list BECAUSE its w_ tile was found on disk a moment ago,
+            // so failing to read it now means it is truncated or a stale format. Skipping
+            // it quietly dropped the whole map out of the navmesh with nothing to show
+            // for it -- and a global-WMO map is an entire dungeon.
             std::shared_ptr<TerrainTile> tile = world::terrain::ReadTile(
                 m_tileDir + "/" + world::terrain::GlobalWmoFileName(mapId));
-            if (tile)
+            if (!tile)
             {
-                const std::vector<std::pair<int, int>> grids = GlobalWmoGrids(*tile);
-                const int written = BakeMap(mapId, label, grids, tile);
-                if (written < 0)
-                {
-                    return -1;
-                }
-                if (m_mapDone)
-                {
-                    m_mapDone(m_progressContext, mapId, label, written, grids.size());
-                }
-                total += written;
+                std::fprintf(stderr, "nav: map %u failed: %s is unreadable\n", mapId,
+                             world::terrain::GlobalWmoFileName(mapId).c_str());
+                return -1;
             }
+
+            const std::vector<std::pair<int, int>> grids = GlobalWmoGrids(*tile);
+            const int written = BakeMap(mapId, label, grids, tile);
+            if (written < 0)
+            {
+                return -1;
+            }
+            if (m_mapDone)
+            {
+                m_mapDone(m_progressContext, mapId, label, written, grids.size());
+            }
+            total += written;
             ++done;
         }
         return total;

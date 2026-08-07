@@ -127,7 +127,15 @@ struct CellObjectGuids
     CellCorpseSet corpses;
 };
 typedef std::unordered_map < uint32/*cell_id*/, CellObjectGuids > CellObjectGuidsMap;
-typedef std::unordered_map < uint32/*(mapid,spawnMode) pair*/, CellObjectGuidsMap > MapObjectGuids;
+typedef std::unordered_map < uint64/*(mapid,spawnMode) pair*/, CellObjectGuidsMap > MapObjectGuids;
+
+/// 64-bit, and NOT MAKE_PAIR32: that macro casts the low half to uint16, and a vessel's
+/// deck map carries a minted id well past 65535 (Transport::RegisterVesselMap). Packed
+/// there, map 1020808 and map 37768 would share one cell store.
+inline uint64 SpawnCellKey(uint32 mapid, uint8 spawnMode)
+{
+    return (uint64(mapid) << 8) | uint64(spawnMode);
+}
 
 // mangos string ranges
 #define MIN_MANGOS_STRING_ID           1                    // 'mangos_string'
@@ -1207,9 +1215,9 @@ class ObjectMgr
         void SetDBCLocaleIndex(uint32 lang) { DBCLocaleIndex = GetIndexForLocale(LocaleConstant(lang)); }
 
         // global grid objects state (static DB spawns, global spawn mods from gameevent system)
-        CellObjectGuids const& GetCellObjectGuids(uint16 mapid, uint8 spawnMode, uint32 cell_id)
+        CellObjectGuids const& GetCellObjectGuids(uint32 mapid, uint8 spawnMode, uint32 cell_id)
         {
-            return mMapObjectGuids[MAKE_PAIR32(mapid, spawnMode)][cell_id];
+            return mMapObjectGuids[SpawnCellKey(mapid, spawnMode)][cell_id];
         }
 
         // Read-only per-cell spawn lookup for diagnostics. Unlike
@@ -1217,9 +1225,9 @@ class ObjectMgr
         // inserts an empty entry on miss, so scanning many cells (e.g. a
         // whole grid) does not mutate mMapObjectGuids. Returns NULL when
         // the cell has no static DB spawn definitions.
-        CellObjectGuids const* GetCellObjectGuidsReadOnly(uint16 mapid, uint32 cell_id) const
+        CellObjectGuids const* GetCellObjectGuidsReadOnly(uint32 mapid, uint32 cell_id) const
         {
-            MapObjectGuids::const_iterator mapItr = mMapObjectGuids.find(mapid);
+            MapObjectGuids::const_iterator mapItr = mMapObjectGuids.find(SpawnCellKey(mapid, 0));
             if (mapItr == mMapObjectGuids.end())
             {
                 return NULL;

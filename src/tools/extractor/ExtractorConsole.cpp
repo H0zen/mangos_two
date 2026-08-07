@@ -562,10 +562,16 @@ namespace world::terrain
                 { out.vessels, out.goModels, "trans", "gomodels (3)", "/gomodels" },
             };
 
+            // THE DEST IN EFFECT, not the one the menu opened with. `dest` is where the
+            // command line pointed; typing "dest <path>" writes out.dest instead, and asking
+            // the stale parameter meant a path set here was never the one looked in -- the
+            // menu refused work whose input was sitting right there under the new dest.
+            const std::string& destNow = out.dest.empty() ? dest : out.dest;
+
             bool impossible = false;
             for (const Need& n : needs)
             {
-                if (n.wanted && !n.feeds && !AlreadyBaked(dest + n.dir))
+                if (n.wanted && !n.feeds && !AlreadyBaked(destNow + n.dir))
                 {
                     Ui().PushLog(std::string("  ") + n.who + " reads " + n.needs +
                                  " and there is none baked yet -- add it, or pick 1",

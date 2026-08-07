@@ -85,7 +85,10 @@ namespace world::terrain
                         std::vector<Crossing>& out) const;
 
         const std::vector<Node>& Nodes() const { return m_nodes; }
-        void Adopt(std::vector<Node> nodes) { m_nodes = std::move(nodes); }
+
+        /// Takes a node array that came from a FILE and proves it is the tree the query
+        /// path assumes before letting it be walked. False leaves the Bvh empty.
+        bool Adopt(std::vector<Node> nodes, size_t triCount);
 
         size_t NodeCount() const { return m_nodes.size(); }
         int MaxDepth() const { return m_maxDepth; }

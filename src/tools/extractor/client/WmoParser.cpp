@@ -167,12 +167,14 @@ namespace world::terrain
         }
 
         bool sawHeader = false;
+        bool truncated = false;
         size_t pos = 0;
         while (pos + 8 <= n)
         {
             const uint32_t sz = RdU32(d + pos + 4);
-            if (pos + 8 + sz > n)
+            if (static_cast<uint64_t>(pos) + 8 + sz > n)
             {
+                truncated = true;
                 break;
             }
             if (TagIs(d + pos, "MOHD") && sz >= 8)
@@ -193,15 +195,24 @@ namespace world::terrain
         }
 
         ReadDoodads(d, n, out);
-        return sawHeader;
+
+        // MOHD is the FIRST chunk, so sawHeader alone says only that the file began
+        // correctly. A root cut anywhere after it -- in MODN or MODD, which is where the
+        // bulk of a root's bytes are -- still returned true, and WmoLoader then baked the
+        // groups against doodads that were partial or absent: the building stands, the
+        // furniture inside it has no collision, and the extraction reports success.
+        // `pos != n` is the same hole one byte earlier, for the same reason it is checked
+        // in ParseWmoGroup: the overrun flag needs a COMPLETE header to fire.
+        return sawHeader && !truncated && pos == n;
     }
 
-    bool ParseWmoGroup(const uint8_t* d, size_t n, uint32_t rootFlags, WmoGroupData& out)
+    WmoGroupParse ParseWmoGroup(const uint8_t* d, size_t n, uint32_t rootFlags,
+                                WmoGroupData& out)
     {
         out = WmoGroupData{};
         if (!d || n < 8)
         {
-            return false;
+            return WmoGroupParse::Malformed;
         }
 
         const uint8_t* mopy = nullptr;
@@ -213,6 +224,7 @@ namespace world::terrain
         const uint8_t* mliq = nullptr;
         uint32_t mliqSize = 0;
         const uint8_t* mogp = nullptr;
+        bool truncated = false;
 
         size_t pos = 0;
         while (pos + 8 <= n)
@@ -222,8 +234,20 @@ namespace world::terrain
             // MOGP is a container: step into it by its header only, so the geometry
             // chunks nested inside get walked as if they were top-level.
             uint32_t advance = sz;
+            bool isContainer = false;
             if (TagIs(tag, "MOGP"))
             {
+                isContainer = true;
+                // The container is exempted from the bounds check below, because stepping
+                // in by the header is the whole point -- so its own declared size is
+                // checked HERE or nowhere. Too short to hold the header, or declaring more
+                // bytes than the file has, and the nested walk reads whatever follows as
+                // if it were geometry.
+                if (sz < MOGP_HEADER || static_cast<uint64_t>(pos) + 8 + sz > n)
+                {
+                    truncated = true;
+                    break;
+                }
                 advance = MOGP_HEADER;
                 mogp = d + pos + 8;
             }
@@ -248,20 +272,34 @@ namespace world::terrain
                 mliqSize = sz;
             }
 
-            if (advance != MOGP_HEADER && pos + 8 + sz > n)
+            // On the container flag, NOT on `advance != MOGP_HEADER`: that compared a
+            // value, so any ordinary chunk whose size happened to be exactly 68 bytes
+            // exempted itself from the only bounds check in this loop.
+            if (!isContainer && static_cast<uint64_t>(pos) + 8 + sz > n)
             {
+                truncated = true;
                 break;
             }
             pos += 8 + advance;
         }
 
-        uint32_t groupLiquid = 0;
-        if (mogp && mogp + MOGP_HEADER <= d + n)
+        // A group file IS a MOGP container, so no MOGP -- or one whose header runs past
+        // the end, or a chunk declaring more bytes than the file holds -- is a broken
+        // file, not a group with nothing in it. Everything past here is a real group.
+        //
+        // `pos != n` is the case the overrun flag cannot see: stepping into MOGP by its
+        // header and walking the nested chunks consumes exactly the container's bytes, so
+        // a well-formed group ends ON the end. A file cut 1-7 bytes into a nested header
+        // leaves the loop by its `pos + 8 <= n` condition without ever entering the body,
+        // and used to answer Empty or Loaded with that geometry silently missing.
+        if (truncated || pos != n || !mogp || mogp + MOGP_HEADER > d + n)
         {
-            out.mogpFlags = RdU32(mogp + MOGP_FLAGS);
-            groupLiquid = RdU32(mogp + MOGP_GROUP_LIQUID);
-            out.groupWmoId = RdU32(mogp + MOGP_UNIQUE_ID);
+            return WmoGroupParse::Malformed;
         }
+
+        out.mogpFlags = RdU32(mogp + MOGP_FLAGS);
+        const uint32_t groupLiquid = RdU32(mogp + MOGP_GROUP_LIQUID);
+        out.groupWmoId = RdU32(mogp + MOGP_UNIQUE_ID);
 
         // MLIQ's trailing uint16 is a materialId, NOT the liquid type. Reading it as
         // the type is how WMO lava and slime end up classified as water.
@@ -273,7 +311,13 @@ namespace world::terrain
             const uint64_t vbytes = uint64_t(xverts) * yverts * 8;
             const uint64_t fbytes = uint64_t(xtiles) * ytiles;
 
-            if (xverts && yverts && xtiles && ytiles && 30 + vbytes + fbytes <= mliqSize)
+            // MLIQ's vertex grid is the tile grid's corners, and every reader indexes it
+            // at a stride of tilesX+1. A file that disagrees would bake a height array
+            // the runtime then walks off the end of, so its liquid is dropped instead.
+            const bool cornersMatchTiles = (xverts == xtiles + 1) && (yverts == ytiles + 1);
+
+            if (xverts && yverts && xtiles && ytiles && cornersMatchTiles &&
+                30 + vbytes + fbytes <= mliqSize)
             {
                 const uint8_t* verts = mliq + 30;
                 const uint8_t* tileFlags = verts + vbytes;
@@ -320,9 +364,10 @@ namespace world::terrain
             }
         }
 
+        // No geometry chunks at all is the ordinary shape of a portal or ambient group.
         if (!movi || !movt)
         {
-            return out.hasLiquid;
+            return out.hasLiquid ? WmoGroupParse::Loaded : WmoGroupParse::Empty;
         }
 
         const uint32_t nVert = movtSize / 12;
@@ -359,6 +404,7 @@ namespace world::terrain
             out.tris.push_back({a, b, c});
         }
 
-        return !out.tris.empty() || out.hasLiquid;
+        return (!out.tris.empty() || out.hasLiquid) ? WmoGroupParse::Loaded
+                                                    : WmoGroupParse::Empty;
     }
 }

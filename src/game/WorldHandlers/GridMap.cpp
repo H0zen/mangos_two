@@ -56,6 +56,7 @@
 #include "DBCEnums.h"
 #include "DBCStores.h"
 #include "GridMap.h"
+#include "DisableMgr.h"
 #include "terrain/TileSerializer.hpp"
 #include "MoveMap.h"
 #include "World.h"
@@ -179,17 +180,15 @@ bool TerrainInfo::Load(const uint32 x, const uint32 y)
         firstReference = (++m_GridRef[x][y] == 1);
     }
 
-    // Pins the cell's tile against the cache sweep for as long as a grid stands on it.
-    // The tile data itself still loads lazily, on the first query that reaches it.
-    m_terrain.PinCell(int(x), int(y));
-
-    // The navmesh tile is loaded by the FIRST referent only -- the refcount above is what
-    // makes several owners of one grid legal, and Unload already releases on the last.
-    // Loading unconditionally made every second owner ask for a tile the first had already
-    // brought in, which the mmap manager rejects and logs. Common now that a vessel is an
-    // active object holding grids a player then walks into.
+    // FIRST referent only, for both, because Unload releases on the LAST: pinning per
+    // reference leaves the count at N-1 and a cell that never falls to zero is never
+    // swept, and loading the navmesh tile per reference asks the mmap manager for a tile
+    // it already has, which it rejects and logs. Common now that a vessel is an active
+    // object holding grids a player then walks into. The tile data itself still loads
+    // lazily, on the first query that reaches it.
     if (firstReference)
     {
+        m_terrain.PinCell(int(x), int(y));
         MMAP::MMapFactory::createOrGetMMapManager()->loadMap(m_mapId, x, y);
     }
     return true;
@@ -244,7 +243,29 @@ world::terrain::Column TerrainInfo::ColumnAt(float x, float y, float zTop, float
                                              const world::terrain::ILiveGeometry* live,
                                              uint32 phasemask) const
 {
-    return m_terrain.ColumnAt(x, y, zTop, zBottom, live, phasemask);
+    world::terrain::Column column =
+        m_terrain.ColumnAt(x, y, zTop, zBottom, live, phasemask);
+
+    // The `disables` table turns collision off per map, and it is answered HERE because
+    // this one gather feeds every height, floor and liquid query. The split is the one
+    // the vmap path made: height drops the baked models and keeps the heightmap, liquid
+    // status drops what a model carries and keeps the tile's own water.
+    if (DisableMgr::IsVMAPDisabledFor(m_mapId, DisableMgr::COLLISION_DISABLE_HEIGHT))
+    {
+        column.DropIf([](const world::terrain::Surface& s)
+                      {
+                          return s.kind == world::terrain::SurfaceKind::Static;
+                      });
+    }
+    if (DisableMgr::IsVMAPDisabledFor(m_mapId, DisableMgr::COLLISION_DISABLE_LIQUIDSTATUS))
+    {
+        column.DropIf([](const world::terrain::Surface& s)
+                      {
+                          return s.kind == world::terrain::SurfaceKind::Liquid &&
+                                 !s.fromAdt;
+                      });
+    }
+    return column;
 }
 
 std::optional<float> TerrainInfo::StaticFloor(float x, float y, float z) const
@@ -256,6 +277,11 @@ std::optional<float> TerrainInfo::StaticFloor(float x, float y, float z) const
 bool TerrainInfo::GetAreaInfo(float x, float y, float z, uint32& flags, int32& adtId,
                               int32& rootId, int32& groupId) const
 {
+    if (DisableMgr::IsVMAPDisabledFor(m_mapId, DisableMgr::COLLISION_DISABLE_AREAFLAG))
+    {
+        return false;
+    }
+
     float groundZ = 0.0f;
     return m_terrain.GetAreaInfo(x, y, z, flags, adtId, rootId, groupId, groundZ);
 }
@@ -352,7 +378,11 @@ GridMapLiquidStatus TerrainInfo::getLiquidStatus(float x, float y, float z,
     const world::terrain::Column column =
         ColumnAt(x, y, z + FLOOR_BURIED_LIFT, z - FLOOR_SEARCH_DOWN);
 
-    const auto liquid = column.HighestLiquid();
+    // The liquid the point is IN, not the highest anywhere in the column: the latter put
+    // a player in a cellar under a building into the lake outside, and a player standing
+    // on a bridge into the river under it. GetTerrainType above keeps HighestLiquid --
+    // it is a 2D query with no point to contain.
+    const auto liquid = column.LiquidAt(z);
     if (!liquid || !liquid->liquidEntry)
     {
         return LIQUID_MAP_NO_WATER;
@@ -502,15 +532,23 @@ float TerrainInfo::GetWaterOrGroundLevel(float x, float y, float z, float* pGrou
 }
 
 bool TerrainInfo::IsInLineOfSight(float x1, float y1, float z1, float x2, float y2,
-                                  float z2) const
+                                  float z2,
+                                  world::terrain::ModelIgnoreFlags ignore) const
 {
-    return m_terrain.IsInLineOfSight(x1, y1, z1, x2, y2, z2);
+    return NearestHitFraction(x1, y1, z1, x2, y2, z2, ignore) > 1.0f;
 }
 
 float TerrainInfo::NearestHitFraction(float x1, float y1, float z1, float x2, float y2,
-                                      float z2) const
+                                      float z2,
+                                      world::terrain::ModelIgnoreFlags ignore) const
 {
-    return m_terrain.NearestHitFraction(x1, y1, z1, x2, y2, z2);
+    // A map with LOS disabled answers "nothing in the way" to both questions, so the
+    // sight test and the hit position cannot disagree about what the segment crosses.
+    if (DisableMgr::IsVMAPDisabledFor(m_mapId, DisableMgr::COLLISION_DISABLE_LOS))
+    {
+        return world::terrain::NO_HIT_FRACTION;
+    }
+    return m_terrain.NearestHitFraction(x1, y1, z1, x2, y2, z2, ignore);
 }
 
 TerrainManager::TerrainManager() : m_mutex()

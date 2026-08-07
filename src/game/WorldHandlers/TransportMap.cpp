@@ -408,6 +408,11 @@ bool TransportMap::Add(Player* passenger)
     Position const* aboard = passenger->m_movementInfo.GetTransportPos();
     passenger->Place().MoveTo(aboard->x, aboard->y, aboard->z, aboard->o);
 
+    // The reset TeleportTo ends with, put where every door passes: walking aboard, logging in
+    // aboard and riding a seam across all arrive here, and only the teleport cleared them. A
+    // stale run flag leaves him running on the spot for anyone ashore until he moves again.
+    passenger->m_movementInfo.SetMovementFlags(MOVEFLAG_ONTRANSPORT);
+
     passenger->GetMapRef().link(this, passenger);
     passenger->SetMap(this);
 
@@ -477,6 +482,82 @@ void TransportMap::Embark(Player* passenger)
     // tick is a pet standing at the rail while its master walks off, which is what a player
     // actually sees. Retail teleports it beside him on the spot; so does this.
     DrawMinionsTo(passenger, this);
+}
+
+bool TransportMap::Board(Player* passenger, float x, float y, float z, float o, uint32 options)
+{
+    Map* sailed = m_vessel ? m_vessel->GetMap() : NULL;
+
+    if (!m_commissioned || !sailed || !MaNGOS::IsValidMapCoord(x, y, z, o))
+    {
+        return false;
+    }
+
+    // BETWEEN TWO WORLD MAPS: refused, and refused HERE, before anything has been written.
+    // The map she names is the one she is leaving, so the client would be sent to load
+    // terrain she is about to be off; and the crossing completes past MapManager's barrier
+    // by walking her passenger list, which this man is not yet on and would not be carried
+    // by. Nothing has moved at the point of this return, so he is still at his source.
+    if (m_vessel->IsCrossing())
+    {
+        return false;
+    }
+
+    Transport* const wasOn = passenger->GetTransport();
+    ObjectGuid const wasGuid = passenger->m_movementInfo.GetTransportGuid();
+    Position const wasAt = *passenger->m_movementInfo.GetTransportPos();
+
+    // Set BEFORE the teleport, and both of them: TeleportTo reads m_transport to decide it is
+    // a far port that keeps its passenger, and writes the offset below into the transfer and
+    // the new-world packet. The order is the same one login uses.
+    passenger->SetTransport(m_vessel);
+    passenger->m_movementInfo.SetTransportData(m_vessel->GetObjectGuid(), x, y, z, o, 0, -1);
+
+    // ALREADY ON THE WATER SHE SAILS: there is no world map to change, so this is the
+    // walk-aboard case and Embark is the whole of it -- the same primitive
+    // HandleMoverRelocation uses when a man simply steps over the rail.
+    //
+    // Teleporting anyway asks TeleportTo for a port to the map he is standing on. Its
+    // near branch is `GetMapId() == mapid && !m_transport`, and m_transport was set six
+    // lines above, so the FAR branch runs instead and Map::CanEnter asserts "already in
+    // map" -- MANGOS_ASSERT, so the world thread aborts and the server is gone. The `.tele`
+    // that found it was Icecrown to a deck on the Icebreaker, which sails Icecrown.
+    // Upstream's own TODO on that condition predicted this.
+    if (passenger->GetMap() == sailed)
+    {
+        Embark(passenger);
+
+        // Embark returns void and declines silently -- not commissioned, not in world. Ask
+        // the map, not the call, so a refusal still reaches the rollback below rather than
+        // leaving him holding a ship he is not standing on.
+        if (passenger->GetMap() == this)
+        {
+            return true;
+        }
+    }
+    // Otherwise her world pose, coarse and temporary -- it names the grid the client must
+    // load and nothing else. The deck offset above is what actually places him.
+    else if (passenger->TeleportTo(sailed->GetId(),
+                                   m_vessel->Where().X(), m_vessel->Where().Y(),
+                                   m_vessel->Where().Z(), m_vessel->Where().Facing(),
+                                   options | TELE_TO_NOT_LEAVE_TRANSPORT))
+    {
+        return true;
+    }
+
+    // A refused teleport must not leave him holding a ship he is not standing on: every
+    // question about where he is would answer from her deck while his body is elsewhere.
+    passenger->SetTransport(wasOn);
+    if (wasOn)
+    {
+        passenger->m_movementInfo.SetTransportData(wasGuid, wasAt.x, wasAt.y, wasAt.z, wasAt.o, 0, -1);
+    }
+    else
+    {
+        passenger->m_movementInfo.ClearTransportData();
+    }
+
+    return false;
 }
 
 void TransportMap::Disembark(Player* passenger, float x, float y, float z, float o)

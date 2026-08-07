@@ -53,8 +53,13 @@ namespace MaNGOS
             {
                 const size_t last = token.find_last_not_of(" \t\r\n\"'");
                 token = token.substr(first, last - first + 1);
-                const long id = std::strtol(token.c_str(), nullptr, 10);
-                if (id > 0)
+                char* end = nullptr;
+                const long id = std::strtol(token.c_str(), &end, 10);
+
+                // Zero is map 0, Eastern Kingdoms -- a legal entry, and rejecting it is
+                // what made LoadAllGridsOnMaps=0 a no-op. What is rejected is a token that
+                // is not a number at all, which the atoi() this replaced read as map 0.
+                if (end && end != token.c_str() && *end == '\0' && id >= 0)
                 {
                     ids.push_back(uint32(id));
                 }

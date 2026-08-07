@@ -11,6 +11,7 @@
 // mangosd asks it, and link none of the server to do so.
 
 #include "terrain/Column.hpp"
+#include "terrain/ICollisionModel.hpp"
 #include "terrain/ILiveGeometry.hpp"
 #include "terrain/Terrain.hpp"
 
@@ -67,11 +68,14 @@ namespace world::terrain
         // which already applies it; adding one here would make static line of sight more
         // permissive than the eyes it models, and would sample a door at a different
         // height than the doorway it sits in.
+        // `ignore` skips whole model categories -- spell line of sight passes M2 so
+        // interior doodads do not block what structural geometry does.
         float NearestHitFraction(float x1, float y1, float z1, float x2, float y2,
-                                 float z2) const;
+                                 float z2,
+                                 ModelIgnoreFlags ignore = ModelIgnoreFlags::Nothing) const;
 
-        bool IsInLineOfSight(float x1, float y1, float z1, float x2, float y2,
-                             float z2) const;
+        bool IsInLineOfSight(float x1, float y1, float z1, float x2, float y2, float z2,
+                             ModelIgnoreFlags ignore = ModelIgnoreFlags::Nothing) const;
 
         // AreaTable.dbc id of the MCNK chunk under (x,y), or 0 when unknown.
         uint16_t GetAreaId(float x, float y) const;
@@ -97,6 +101,7 @@ namespace world::terrain
         using TilePtr = std::shared_ptr<const TerrainTile>;
 
         TilePtr TileAt(float x, float y) const;
+        TilePtr TileAtIndex(int tx, int ty) const;
         TilePtr GlobalWmo() const;
         TilePtr LoadCell(int tx, int ty) const;
         void EvictTile(int tx, int ty) const;
@@ -114,7 +119,8 @@ namespace world::terrain
         // contend on one exclusive lock for every height, liquid and sight query.
         //
         // A null-but-probed entry is a memo that the map has no such tile; it costs one
-        // byte and spares a failed file open per query, so the sweep keeps it.
+        // byte and spares a failed file open per query. The sweep expires it on the same
+        // idle timer as a resident tile, so a tile baked after start is still found.
         mutable std::array<std::array<TilePtr, GRID_COUNT>, GRID_COUNT> m_tiles;
         mutable std::array<std::array<uint8_t, GRID_COUNT>, GRID_COUNT> m_loaded{};
         mutable TilePtr m_globalWmo;
@@ -126,7 +132,10 @@ namespace world::terrain
         std::atomic<uint32_t> m_clockMs{0};
         uint32_t m_sweepAccumMs = 0;
 
-        std::array<std::array<int16_t, GRID_COUNT>, GRID_COUNT> m_cellRef{};
+        /// Unsigned and 32 bits wide: as int16_t this wrapped negative at 32,768 pins,
+        /// after which UnpinCell's `> 0` never decremented again and the cell was both
+        /// permanently unpinnable and evictable while still referenced.
+        std::array<std::array<uint32_t, GRID_COUNT>, GRID_COUNT> m_cellRef{};
         mutable std::mutex m_cellRefMutex;
     };
 }

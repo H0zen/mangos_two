@@ -90,6 +90,12 @@ namespace world
                     case LiquidDbcType::Slime: return LiquidKind::Slime;
                 }
             }
+
+            // ONCE THE STORE IS LOADED IT IS THE AUTHORITY. A row it does not have, or
+            // one whose type is not a category, is a liquid this build cannot identify --
+            // and the table below would answer Water for it, which makes an unrecognised
+            // magma or slime swimmable and safe. Unknown is not water.
+            return LiquidKind::None;
         }
 
         if (entry <= 12)

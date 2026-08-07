@@ -624,6 +624,10 @@ class ChatHandler
         bool HandleAnnounceCommand(char* args);
         bool HandleNotifyCommand(char* args);
         bool HandleGPSCommand(char* args);
+
+        // The transport half of .gps: deck offsets and what the baked mesh says is under
+        // them. No-op when the object is not aboard anything.
+        void ReportTransportPosition(WorldObject* obj);
         bool HandleTaxiCheatCommand(char* args);
         bool HandleWhispersCommand(char* args);
         bool HandleModifyDrunkCommand(char* args);

@@ -163,13 +163,13 @@ float DynamicCollision::NearestHitFraction(float x1, float y1, float z1, float x
     const Vector3 seg = b - a;
     if (Geometry::dot(seg, seg) < 1e-6f)
     {
-        return 2.0f;
+        return world::terrain::NO_HIT_FRACTION;
     }
 
     auto inv = [](float d) { return std::fabs(d) > 1e-9f ? 1.0f / d : 1e30f; };
     const Vector3 invDir{inv(seg.x), inv(seg.y), inv(seg.z)};
 
-    float best = 2.0f;
+    float best = world::terrain::NO_HIT_FRACTION;
     ForEachCandidate(std::min(x1, x2), std::min(y1, y2), std::max(x1, x2),
                      std::max(y1, y2), [&](const GameObjectModel& model)
     {
