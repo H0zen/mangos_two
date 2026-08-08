@@ -190,6 +190,76 @@ inline void BeforeVisibilityDestroy<Creature>(Creature* t, Player* p)
 }
 
 /**
+ * @brief Things the awareness cap must never refuse.
+ *
+ * Not a courtesy list -- each of these is something the CLIENT breaks without. A raid
+ * spread across a zone is the case the grid alone gets wrong: the frames are drawn for
+ * members who are nowhere near, so membership is an awareness source of its own and the
+ * distance-based bound must not touch it.
+ *
+ * Only units are bounded at all. Game objects, corpses and dynamic objects are few, and
+ * a door nobody can see is a worse bug than the one this exists to prevent.
+ */
+bool Player::IsAwarenessExempt(WorldObject const* target) const
+{
+    if (target == this || !target->isType(TYPEMASK_UNIT))
+    {
+        return true;
+    }
+
+    Unit const* unit = static_cast<Unit const*>(target);
+
+    // Whatever this player has selected: the client asks about it by guid and cannot be
+    // told "no such object" about something it is already showing a frame for.
+    if (m_curSelectionGuid && m_curSelectionGuid == unit->GetObjectGuid())
+    {
+        return true;
+    }
+
+    // Own pets, charms and totems, then the party or raid -- the owner guid covers a
+    // member's pet as well as the member, which is the same rule stated once.
+    ObjectGuid const& owner = unit->GetCharmerOrOwnerOrOwnGuid();
+    if (owner == GetObjectGuid())
+    {
+        return true;
+    }
+    if (Group const* group = const_cast<Player*>(this)->GetGroup())
+    {
+        if (group->IsMember(owner))
+        {
+            return true;
+        }
+    }
+
+    // Anyone this player is fighting, in either direction. Losing sight of an attacker
+    // is not a saving, it is a bug report.
+    if (unit->getVictim() == this || getVictim() == unit)
+    {
+        return true;
+    }
+    return unit->getAttackers().find(const_cast<Player*>(this)) != unit->getAttackers().end();
+}
+
+bool Player::AwarenessHasRoomFor(WorldObject const* target) const
+{
+    const uint32 cap = sWorld.getConfig(CONFIG_UINT32_VISIBILITY_AWARENESS_CAP);
+    if (!cap)
+    {
+        return true;
+    }
+
+    if (m_clientGUIDs.size() < cap || IsAwarenessExempt(target))
+    {
+        return true;
+    }
+
+    DEBUG_FILTER_LOG(LOG_FILTER_VISIBILITY_CHANGES,
+                     "AwarenessCap: %s not admitted for %s; the known set is at its cap of %u",
+                     target->GetGuidStr().c_str(), GetGuidStr().c_str(), cap);
+    return false;
+}
+
+/**
  * @brief Updates visibility of a single world object for the player.
  *
  * @param viewPoint The viewpoint used for visibility checks.
@@ -222,7 +292,9 @@ void Player::UpdateVisibilityOf(WorldObject const* viewPoint, WorldObject* targe
     }
     else
     {
-        if (target->IsVisibleForInState(this, viewPoint, false))
+        // Both admission paths ask, or an object refused by the sweep would walk in
+        // through this one on the next relocation notify.
+        if (AwarenessHasRoomFor(target) && target->IsVisibleForInState(this, viewPoint, false))
         {
             target->SendCreateUpdateToPlayer(this);
             if (target->GetTypeId() != TYPEID_GAMEOBJECT || !(reinterpret_cast<GameObject*>(target))->IsTransport())
@@ -276,7 +348,7 @@ void Player::UpdateVisibilityOf(WorldObject const* viewPoint, T* target, UpdateD
     }
     else
     {
-        if (target->IsVisibleForInState(this, viewPoint, false))
+        if (AwarenessHasRoomFor(target) && target->IsVisibleForInState(this, viewPoint, false))
         {
             visibleNow.insert(target);
             target->BuildCreateUpdateBlockForPlayer(&data, this);

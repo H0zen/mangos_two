@@ -238,6 +238,9 @@ enum eConfigUInt32Values
     CONFIG_UINT32_CINEMATIC_FLYOVER_UPDATE_INTERVAL_MS,
     CONFIG_UINT32_CINEMATIC_FLYOVER_TIMEOUT_SEC,
     CONFIG_UINT32_CINEMATIC_FLYOVER_BODY_ENTRY,
+    /// Per-viewer ceiling on the known-object set. 0 is unbounded, which is what this
+    /// server has always been. See Player::AwarenessHasRoomFor.
+    CONFIG_UINT32_VISIBILITY_AWARENESS_CAP,
     CONFIG_UINT32_VALUE_COUNT
 };
 

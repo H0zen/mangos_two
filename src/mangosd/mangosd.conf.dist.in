@@ -1354,6 +1354,20 @@ GM.MaxSpeedFactor        = 10
 #        Visibility grey distance for dynobjects/gameobjects/corpses/creature bodies
 #        Default: 10 (yards)
 #
+#    Visibility.AwarenessCap
+#        Ceiling on how many objects ONE client is told about. A thousand mutually
+#        visible players is a million pairs, and no spatial index removes one of them:
+#        the grid narrows who is a candidate, and in a packed city every candidate is
+#        real. This bounds the set by decision instead, so N*N becomes N*K.
+#        Never refuses: the player's own self, its current target, its pets and totems,
+#        its party or raid and their pets, anyone it is fighting, and every game object,
+#        corpse and dynamic object -- only units are bounded at all.
+#        Refusal only, never eviction: an object already known is never dropped by the
+#        cap, so the set cannot oscillate. The price is that past the cap a newcomer
+#        waits for room rather than displacing something further away.
+#        Set LogFilter_VisibilityChanges = 0 to see what is being refused.
+#        Default: 0 (unbounded, as this server has always been)
+#
 #    Visibility.RelocationLowerLimit
 #        Object's visibility update called, when distance between current object's position and position,
 #        where visiblity was updated last time, reaches RelocationLoverLimit value
@@ -1386,6 +1400,7 @@ Visibility.Distance.BGArenas       = 180
 Visibility.Distance.InFlight       = 100
 Visibility.Distance.Grey.Unit      = 1
 Visibility.Distance.Grey.Object    = 10
+Visibility.AwarenessCap            = 0
 Visibility.RelocationLowerLimit    = 10
 Visibility.AIRelocationNotifyDelay = 1000
 Visibility.ObserverSweep.Enable    = 1

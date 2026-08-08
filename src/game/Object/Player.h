@@ -3639,6 +3639,33 @@ class Player : public Unit
         // Check if an object is visible to the client
         bool HaveAtClient(WorldObject const* u) { return u == this || m_clientGUIDs.find(u->GetObjectGuid()) != m_clientGUIDs.end(); }
 
+        /**
+         * @brief May this viewer learn about one more object?
+         *
+         * A thousand mutually visible players is a million pairs, and no spatial index
+         * removes one of them: a grid narrows who is a CANDIDATE, and in a packed city
+         * every candidate is real. So the per-viewer set is bounded by decision rather
+         * than by geometry -- N*N becomes N*K -- with the things a client cannot be
+         * allowed to miss exempt from the bound.
+         *
+         * REFUSAL ONLY, NEVER EVICTION, and that is what makes it safe here. Visibility
+         * in this tree is elimination-by-leftovers: VisibleNotifier copies the known
+         * set, erases whatever the cell sweep re-finds, and destroys the remainder. A
+         * cap applied to the SWEEP would leave the object at the edge unfound every
+         * other tick, so the client would receive a create and a destroy for it forever.
+         * Applied to admission, an object already known is never reconsidered, so the
+         * set is stable by construction and needs no hysteresis.
+         *
+         * The price is first-come-first-served among ordinary objects: past the cap, a
+         * newcomer waits for room. Priority ADMISSION -- dropping a weaker member to let
+         * a nearer one in -- is deliberately not implemented, because that is the half
+         * that can thrash.
+         */
+        bool AwarenessHasRoomFor(WorldObject const* target) const;
+
+        /// Things the cap must never refuse: see AwarenessHasRoomFor.
+        bool IsAwarenessExempt(WorldObject const* target) const;
+
         // Check if the player is visible in the grid for another player
         bool IsVisibleInGridForPlayer(Player* pl) const override;
 
