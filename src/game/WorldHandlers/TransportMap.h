@@ -184,7 +184,12 @@ class TransportMap : public Map
 
         /// Drop the index at shutdown. The creatures are this map's to destroy, like any
         /// other map's.
-        void ReleaseCrew() { m_crew.clear(); }
+        /// Let go of everything this map holds by RAW POINTER. The crew, and the watchers
+        /// ashore -- the latter is a per-TICK cache, refreshed by GatherObservers at the top
+        /// of every tick, and it is only valid because a tick follows. Teardown is the one
+        /// moment there is no next tick: WithdrawFromWorld runs after the players are gone,
+        /// and anything still relaying through the stale list reads freed memory.
+        void ReleaseCrew() { m_crew.clear(); m_externalObservers.clear(); }
 
         // --- What the shore is told ------------------------------------------------
         //
