@@ -87,18 +87,22 @@ uint32 WorldStateMgr::GetState(uint32 zoneId, uint32 stateId) const
     return state != zone->second.end() ? state->second : 0;
 }
 
-bool WorldStateMgr::SetState(uint32 zoneId, uint32 stateId, uint32 value)
+bool WorldStateMgr::SetState(uint32 zoneId, uint32 stateId, uint32 value, bool force)
 {
     if (!stateId)
     {
         return false;
     }
 
+    bool changed = true;
+
     {
         std::unique_lock<std::shared_mutex> guard(m_lock);
 
         uint32& stored = m_states[zoneId][stateId];
-        if (stored == value)
+        changed = (stored != value);
+
+        if (!changed && !force)
         {
             return false;
         }
@@ -110,10 +114,10 @@ bool WorldStateMgr::SetState(uint32 zoneId, uint32 stateId, uint32 value)
     // write lock across that would stall every map thread reading a landmark's state
     // for as long as the slowest client's send buffer takes.
     Broadcast(zoneId, stateId, value);
-    return true;
+    return changed;
 }
 
-bool WorldStateMgr::SetPoiState(uint32 poiId, uint32 value)
+bool WorldStateMgr::SetPoiState(uint32 poiId, uint32 value, bool force)
 {
     AreaPOIEntry const* poi = sAreaPOIStore.LookupEntry(poiId);
     if (!poi)
@@ -136,7 +140,7 @@ bool WorldStateMgr::SetPoiState(uint32 poiId, uint32 value)
                       poiId, value, MAX_POI_ICON_SLOT);
     }
 
-    return SetState(ZoneOfPoi(*poi), poi->WorldStateID, value);
+    return SetState(ZoneOfPoi(*poi), poi->WorldStateID, value, force);
 }
 
 void WorldStateMgr::FillInitialStates(uint32 zoneId, ByteBuffer& data, uint32& count) const
