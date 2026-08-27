@@ -2045,20 +2045,31 @@ void Map::AppendZoneMapTrackedBlocks(UpdateData& data, Player* observer)
 
 void Map::SendInitZoneMapTracked(Player* player)
 {
-    // This map's own -- the siege vehicles of a Wintergrasp or an Isle of Conquest.
-    UpdateData data;
-    AppendZoneMapTrackedBlocks(data, player);
+    // THE ANCHOR, not this map. A player standing on a deck is looking at the world map the
+    // ship sails -- that is the zone whose map he opens with M, and its icons are his to
+    // see. Keying this off the map he is physically on would answer for map 622, which has
+    // no vessels filed under it and is not the map he is looking at.
+    Map* anchor = AnchorWorld();
+    if (!anchor)
+    {
+        return;
+    }
 
-    // And every deck sailing it. A gunship's icon-carrying unit stands on the vessel's own
-    // map, so it is not in this map's list and no sweep of this map's cells will ever find
-    // it. SendInitTransports ran just before us and handed the player the hulls, so the
-    // transport guid these blocks name is already at his client.
-    MapManager::TransportsByMapType::const_iterator vessels = sMapMgr.m_TransportsByMap.find(i_id);
+    // The anchor's own -- the siege vehicles of a Wintergrasp or an Isle of Conquest.
+    UpdateData data;
+    anchor->AppendZoneMapTrackedBlocks(data, player);
+
+    // And every deck sailing it, including the one under his feet. A gunship's icon-carrying
+    // unit stands on the vessel's own map, so no cell of the anchor map will ever find it.
+    // The hulls reached him just before this -- SendInitTransports ashore, the vessel loop in
+    // TransportMap::Add aboard -- so the transport guid these blocks name is already held.
+    MapManager::TransportsByMapType::const_iterator vessels =
+        sMapMgr.m_TransportsByMap.find(anchor->GetId());
     if (vessels != sMapMgr.m_TransportsByMap.end())
     {
         for (Transport* vessel : vessels->second)
         {
-            if (vessel->GetMapId() != i_id)
+            if (vessel->FindMap() != anchor)
             {
                 continue;
             }
