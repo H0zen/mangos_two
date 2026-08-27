@@ -81,12 +81,20 @@ class WorldStateMgr
 
         /**
          * @brief Store a world state and push it to everyone who can see it.
+         * @param force send even when the stored value already matched.
          * @return true when the value actually changed; false when it already held it.
          *
          * The push is edge-triggered on purpose: re-sending an unchanged value costs a
          * packet per player and buys nothing, since the client stores what it was told.
+         *
+         * `force` exists because THIS STORE IS NOT THE ONLY THING THAT TALKS TO THE CLIENT.
+         * A battleground and an OutdoorPvP script send their own states straight out and
+         * keep them in their own state, so for those ids the client can be holding a value
+         * this store has never seen. Asking for the value it already believes is then a
+         * legitimate request to actually send it, not a no-op -- which is exactly the case
+         * when someone is trying to turn an Eastern Plaguelands tower icon off by hand.
          */
-        bool SetState(uint32 zoneId, uint32 stateId, uint32 value);
+        bool SetState(uint32 zoneId, uint32 stateId, uint32 value, bool force = false);
 
         /**
          * @brief Set the landmark's icon by AreaPOI id, resolving zone and state from the row.
@@ -94,7 +102,7 @@ class WorldStateMgr
          * @param value 0 hides the landmark, 1..9 selects Icon[value - 1].
          * @return false when the row is unknown or carries no world state to move.
          */
-        bool SetPoiState(uint32 poiId, uint32 value);
+        bool SetPoiState(uint32 poiId, uint32 value, bool force = false);
 
         /// Append every state known for this zone (plus the global ones) to an init packet.
         void FillInitialStates(uint32 zoneId, ByteBuffer& data, uint32& count) const;

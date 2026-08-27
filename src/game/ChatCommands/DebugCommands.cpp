@@ -482,9 +482,9 @@ bool ChatHandler::HandleDebugWorldStateCommand(char* args)
         return true;
     }
 
-    const bool changed = sWorldStateMgr.SetState(zoneId, stateId, value);
+    const bool changed = sWorldStateMgr.SetState(zoneId, stateId, value, true);
     PSendSysMessage("World state %u in zone %u -> %u%s", stateId, zoneId, value,
-                    changed ? "" : " (unchanged, nothing sent)");
+                    changed ? "" : " (was already that; sent anyway)");
 
     // What it drives, if anything -- the reason to be setting one by hand at all.
     for (AreaPOIEntry const* poi : sWorldStateMgr.PoisOfState(stateId))
@@ -542,14 +542,29 @@ bool ChatHandler::HandleDebugPoiCommand(char* args)
         return false;
     }
 
-    if (!sWorldStateMgr.SetPoiState(poiId, value))
+    // THE ROW IS CHECKED HERE, not inferred from the setter's answer. SetPoiState returns
+    // false for two unrelated reasons -- no such landmark, and the value was already that --
+    // and reporting the second as the first told you a landmark did not exist while you were
+    // looking at it in the list above.
+    AreaPOIEntry const* poi = sAreaPOIStore.LookupEntry(poiId);
+    if (!poi)
     {
-        PSendSysMessage("Landmark %u is unknown, or reads no world state.", poiId);
+        PSendSysMessage("Landmark %u is not in AreaPOI.dbc.", poiId);
         SetSentErrorMessage(true);
         return false;
     }
 
-    PSendSysMessage("Landmark %u -> %u", poiId, value);
+    if (!poi->WorldStateID)
+    {
+        PSendSysMessage("Landmark %u reads no world state -- the client draws it "
+                        "unconditionally and the server cannot move it.", poiId);
+        SetSentErrorMessage(true);
+        return false;
+    }
+
+    const bool changed = sWorldStateMgr.SetPoiState(poiId, value, true);
+    PSendSysMessage("Landmark %u (state %u) -> %u%s", poiId, poi->WorldStateID, value,
+                    changed ? "" : " (was already that; sent anyway)");
     return true;
 }
 
