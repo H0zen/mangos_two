@@ -229,9 +229,26 @@ void Object::BuildValuesUpdateBlockForPlayer(UpdateData* data, Player* target) c
  *
  * Adds this object's GUID to the out-of-range list,
  * indicating it should be removed from the client's view.
+ *
+ * A UNIT THE CLIENT DRAWS ON THE ZONE MAP IS NEVER SENT ONE. The battlefield-vehicle
+ * list is built on CREATE and emptied on DESTROY, and a destroy block is a destroy
+ * block whatever prompted it -- so the moment an observer ashore drifts out of the
+ * vessel's relay range, or a deck is torn down for him, the gunship drops out of that
+ * list and its icon disappears from his map. The icon is meant to hold for the whole
+ * zone, far past anything the observer can see, so the block is refused at the one
+ * place every caller goes through rather than at each of them.
+ *
+ * The leak this trades for is bounded and harmless: the client dedups the list by guid,
+ * caps it at 40, and clears it outright on world init -- and Blizzard ships exactly two
+ * rows carrying the flag.
  */
 void Object::BuildOutOfRangeUpdateBlock(UpdateData* data) const
 {
+    if (isType(TYPEMASK_UNIT) && ((Unit const*)this)->IsTrackedOnZoneMap())
+    {
+        return;
+    }
+
     data->AddOutOfRangeGUID(GetObjectGuid());
 }
 
@@ -241,10 +258,24 @@ void Object::BuildOutOfRangeUpdateBlock(UpdateData* data) const
  *
  * Sends a destroy packet to the specified player,
  * removing this object from their game world.
+ *
+ * Refused for a unit the client tracks on the zone map, for the reason spelled out over
+ * BuildOutOfRangeUpdateBlock: this is the other door out, and the visibility sweep uses
+ * THIS one for creatures. Guarding only the update block would have left the hole open.
+ *
+ * The cost is that such a unit really removed at runtime keeps its icon until the client
+ * next clears the list -- a zone change or a relog. That is the right way round: an icon
+ * that lingers is a nuisance, an icon that vanishes whenever the player walks inland is
+ * the bug being fixed.
  */
 void Object::DestroyForPlayer(Player* target, bool anim) const
 {
     MANGOS_ASSERT(target);
+
+    if (isType(TYPEMASK_UNIT) && ((Unit const*)this)->IsTrackedOnZoneMap())
+    {
+        return;
+    }
 
     WorldPacket data(SMSG_DESTROY_OBJECT, 9);
     data << GetObjectGuid();
