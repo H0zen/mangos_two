@@ -321,6 +321,15 @@ void WorldObject::SendMessageToSet(WorldPacket* data, bool /*bToSelf*/) const
 
 void WorldObject::RelayAcrossHull(WorldPacket* data, Player const* skipped) const
 {
+    // NOT WHILE THE WORLD IS COMING DOWN. Every list this walks is a raw-pointer cache kept
+    // between ticks, and teardown is the one time there is no next tick to refresh them:
+    // MapManager::UnloadAll runs after the last session is gone, and the grid unload it does
+    // still cancels spells, which still broadcasts. There is nobody left to tell.
+    if (World::IsStopped())
+    {
+        return;
+    }
+
     // THE RELAY, OUTBOUND. The people ashore are on another map and no cell of theirs will
     // ever hold this deckhand, so the same packet goes out again to the watchers the vessel
     // gathered at the top of this tick. Sent immediately: the deck runs INSIDE the tick of
