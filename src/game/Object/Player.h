@@ -3639,6 +3639,25 @@ class Player : public Unit
         // Check if an object is visible to the client
         bool HaveAtClient(WorldObject const* u) { return u == this || m_clientGUIDs.find(u->GetObjectGuid()) != m_clientGUIDs.end(); }
 
+        /**
+         * @brief Record that this player now holds / no longer holds a create block.
+         *
+         * THE ONLY TWO PLACES m_clientGUIDs AND WorldObject::m_observers MOVE TOGETHER.
+         * Everything that used to touch the set directly goes through these instead, so
+         * the forward and reverse directions cannot describe different worlds.
+         */
+        void RememberSeen(WorldObject* target);
+        void ForgetSeen(WorldObject* target);
+
+        /// The guid-only path, for the leftovers sweep, which holds no objects. Resolves
+        /// the target when it can and drops the guid regardless: an object that cannot be
+        /// resolved is gone, and its reverse index went with it.
+        void ForgetSeen(ObjectGuid target);
+
+        /// Drop every belief at once -- a map change, where the client threw away its whole
+        /// world. Detaches from each object first, so nothing keeps a stale observer.
+        void ForgetEverythingSeen();
+
         // Check if the player is visible in the grid for another player
         bool IsVisibleInGridForPlayer(Player* pl) const override;
 

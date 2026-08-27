@@ -122,7 +122,7 @@ void VisibleNotifier::Notify()
     i_data.AddOutOfRangeGUID(outOfRange);
     for (GuidSet::iterator itr = i_clientGUIDs.begin(); itr != i_clientGUIDs.end(); ++itr)
     {
-        player.m_clientGUIDs.erase(*itr);
+        player.ForgetSeen(*itr);
 
         DEBUG_FILTER_LOG(LOG_FILTER_VISIBILITY_CHANGES, "%s is out of range (no in active cells set) now for %s",
                          itr->GetString().c_str(), player.GetGuidStr().c_str());

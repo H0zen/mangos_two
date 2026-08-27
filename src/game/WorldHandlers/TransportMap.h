@@ -219,21 +219,6 @@ class TransportMap : public Map
         static void CollectRelaySources(WorldObject const* viewer, float visibility,
                                         std::vector<RelaySource>& out);
 
-        /**
-         * @brief The players on the far side of a vessel boundary who must hear about `obj`.
-         *
-         * The twin of CollectRelaySources, for BROADCAST rather than for a cell sweep. That
-         * one answers "where else must I look"; this one answers "who else must be told",
-         * and the two are needed in different places for the same reason: a deck and the
-         * shore are two maps, and a cell visit of one never reaches the other.
-         *
-         * Without it a value update never crosses at all -- the accumulator behind
-         * BuildUpdateData visits cameras in cells around the object, and every camera that
-         * matters here is on the other map. A deckhand killed at sea stayed standing for
-         * everyone ashore; a quest giver on the pier stayed frozen for everyone aboard.
-         */
-        static void CollectRelayAudience(WorldObject const* obj, std::vector<Player*>& out);
-
         /// Append the crew's blocks to a packet already carrying the vessel's. Deliberately
         /// does NOT stamp m_clientGUIDs: they ride the vessel's map-membership channel, and
         /// the elimination sweep -- the only thing that set feeds -- must never learn they

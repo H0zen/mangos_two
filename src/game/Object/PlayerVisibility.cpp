@@ -215,7 +215,7 @@ void Player::UpdateVisibilityOf(WorldObject const* viewPoint, WorldObject* targe
                 target->DestroyForPlayer(this);
             }
 
-            m_clientGUIDs.erase(t_guid);
+            ForgetSeen(target);
 
             DEBUG_FILTER_LOG(LOG_FILTER_VISIBILITY_CHANGES, "UpdateVisibilityOf: %s out of range for player %u. Distance = %f", t_guid.GetString().c_str(), GetGUIDLow(), Where().DistanceTo(target->Where()));
         }
@@ -227,7 +227,7 @@ void Player::UpdateVisibilityOf(WorldObject const* viewPoint, WorldObject* targe
             target->SendCreateUpdateToPlayer(this);
             if (target->GetTypeId() != TYPEID_GAMEOBJECT || !(reinterpret_cast<GameObject*>(target))->IsTransport())
             {
-                m_clientGUIDs.insert(target->GetObjectGuid());
+                RememberSeen(target);
             }
 
             DEBUG_FILTER_LOG(LOG_FILTER_VISIBILITY_CHANGES, "UpdateVisibilityOf: %s is visible now for player %u. Distance = %f", target->GetGuidStr().c_str(), GetGUIDLow(), Where().DistanceTo(target->Where()));
@@ -269,7 +269,7 @@ void Player::UpdateVisibilityOf(WorldObject const* viewPoint, T* target, UpdateD
             ObjectGuid t_guid = target->GetObjectGuid();
 
             target->BuildOutOfRangeUpdateBlock(&data);
-            m_clientGUIDs.erase(t_guid);
+            ForgetSeen(target);
 
             DEBUG_FILTER_LOG(LOG_FILTER_VISIBILITY_CHANGES, "UpdateVisibilityOf(TemplateV): %s is out of range for %s. Distance = %f", t_guid.GetString().c_str(), GetGuidStr().c_str(), Where().DistanceTo(target->Where()));
         }
@@ -280,7 +280,16 @@ void Player::UpdateVisibilityOf(WorldObject const* viewPoint, T* target, UpdateD
         {
             visibleNow.insert(target);
             target->BuildCreateUpdateBlockForPlayer(&data, this);
+
+            // The helper is a type dispatch, not a set insert: a transport gameobject is
+            // deliberately never stamped. So the reverse side is attached only if the
+            // helper actually agreed to remember it.
+            const std::size_t before = m_clientGUIDs.size();
             UpdateVisibilityOf_helper(m_clientGUIDs, target);
+            if (m_clientGUIDs.size() != before)
+            {
+                target->AddObserver(GetObjectGuid());
+            }
 
             DEBUG_FILTER_LOG(LOG_FILTER_VISIBILITY_CHANGES, "UpdateVisibilityOf(TemplateV): %s is visible now for %s. Distance = %f", target->GetGuidStr().c_str(), GetGuidStr().c_str(), Where().DistanceTo(target->Where()));
         }
@@ -292,3 +301,63 @@ template void Player::UpdateVisibilityOf(WorldObject const* viewPoint, Creature*
 template void Player::UpdateVisibilityOf(WorldObject const* viewPoint, Corpse*        target, UpdateData& data, std::set<WorldObject*>& visibleNow);
 template void Player::UpdateVisibilityOf(WorldObject const* viewPoint, GameObject*    target, UpdateData& data, std::set<WorldObject*>& visibleNow);
 template void Player::UpdateVisibilityOf(WorldObject const* viewPoint, DynamicObject* target, UpdateData& data, std::set<WorldObject*>& visibleNow);
+
+void WorldObject::DetachAllObservers()
+{
+    // Only this side. The observers' forward sets are NOT corrected from here, and that is
+    // deliberate: they live on maps this object cannot reach, and the leftovers sweep
+    // already drops a guid whose object is gone. Correcting them would mean a lookup per
+    // observer per despawn to fix something that fixes itself one tick later.
+    m_observers.clear();
+}
+
+void Player::RememberSeen(WorldObject* target)
+{
+    if (!target || target == this)
+    {
+        return;
+    }
+
+    m_clientGUIDs.insert(target->GetObjectGuid());
+    target->AddObserver(GetObjectGuid());
+}
+
+void Player::ForgetSeen(WorldObject* target)
+{
+    if (!target)
+    {
+        return;
+    }
+
+    m_clientGUIDs.erase(target->GetObjectGuid());
+    target->RemoveObserver(GetObjectGuid());
+}
+
+void Player::ForgetSeen(ObjectGuid target)
+{
+    m_clientGUIDs.erase(target);
+
+    // Best effort on the reverse side. The guid may name something already destroyed, in
+    // which case there is no set left to correct and nothing has leaked.
+    if (Map* on = FindMap())
+    {
+        if (WorldObject* obj = on->GetWorldObject(target))
+        {
+            obj->RemoveObserver(GetObjectGuid());
+        }
+    }
+}
+
+void Player::ForgetEverythingSeen()
+{
+    GuidSet const held = m_clientGUIDs;
+    for (ObjectGuid const& guid : held)
+    {
+        ForgetSeen(guid);
+    }
+
+    // Whatever could not be resolved above is dropped here anyway: the client threw its
+    // world away, so believing otherwise is the one error that cannot be recovered from --
+    // anything still listed is skipped by UpdateVisibilityOf and never sent again.
+    m_clientGUIDs.clear();
+}
