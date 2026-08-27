@@ -112,8 +112,7 @@ void VisibleNotifier::Notify()
     GuidSet outOfRange;
     for (GuidSet::const_iterator itr = i_clientGUIDs.begin(); itr != i_clientGUIDs.end(); ++itr)
     {
-        Unit* tracked = player.GetMap()->GetAnyTypeCreature(*itr);
-        if (!tracked || !tracked->IsTrackedOnZoneMap())
+        if (!player.GetMap()->IsZoneMapTrackedGuid(*itr))
         {
             outOfRange.insert(*itr);
         }

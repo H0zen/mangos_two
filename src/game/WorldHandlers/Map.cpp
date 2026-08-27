@@ -2043,6 +2043,51 @@ void Map::AppendZoneMapTrackedBlocks(UpdateData& data, Player* observer)
     }
 }
 
+bool Map::IsZoneMapTrackedGuid(ObjectGuid guid)
+{
+    Map* anchor = AnchorWorld();
+    if (!anchor)
+    {
+        return false;
+    }
+
+    // The lists are tiny -- two gunship units, plus whatever siege vehicles a battle has
+    // standing -- so a walk beats keeping a second index in step with the first.
+    for (Creature* tracked : anchor->m_zoneMapTracked)
+    {
+        if (tracked->GetObjectGuid() == guid)
+        {
+            return true;
+        }
+    }
+
+    MapManager::TransportsByMapType::const_iterator vessels =
+        sMapMgr.m_TransportsByMap.find(anchor->GetId());
+    if (vessels == sMapMgr.m_TransportsByMap.end())
+    {
+        return false;
+    }
+
+    for (Transport* vessel : vessels->second)
+    {
+        TransportMap* hull = vessel->AsMap();
+        if (!hull || vessel->FindMap() != anchor)
+        {
+            continue;
+        }
+
+        for (Creature* tracked : hull->m_zoneMapTracked)
+        {
+            if (tracked->GetObjectGuid() == guid)
+            {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
 void Map::SendInitZoneMapTracked(Player* player)
 {
     // THE ANCHOR, not this map. A player standing on a deck is looking at the world map the
