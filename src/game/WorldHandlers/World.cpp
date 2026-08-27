@@ -828,9 +828,6 @@ void World::SetInitialWorldSettings()
     sLog.outString("Loading BattleGround event indexes...");
     sBattleGroundMgr.LoadBattleEventIndexes();
 
-    sLog.outString("Loading GameTeleports...");
-    sObjectMgr.LoadGameTele();
-
     sLog.outString("Loading GM tickets...");
     sTicketMgr.LoadGMTickets();
 
@@ -983,6 +980,17 @@ void World::SetInitialWorldSettings()
     // Not sure if this can be moved up in the sequence (with static data loading) as it uses MapManager
     sLog.outString("Loading Transports...");
     sMapMgr.LoadTransports();
+
+    // AFTER the transports, and that is not a preference. A `game_tele` row may name a
+    // VESSEL'S DECK -- `.tele add` on a ship records the deck map's id and the deck point,
+    // which is the only description of that spot that stays true while she sails. A deck
+    // map has no row in Map.dbc; one is minted and injected when the vessel is loaded, just
+    // above. Loading the teleports before that meant every row aboard failed the map check
+    // and was dropped with "wrong position", so `.tele <ship spot>` answered "location not
+    // found" after the next restart -- while the same name had worked all session, because
+    // the in-memory add never went through this check.
+    sLog.outString("Loading GameTeleports...");
+    sObjectMgr.LoadGameTele();
 
     sLog.outString("Deleting expired bans...");
     LoginDatabase.Execute("DELETE FROM `ip_banned` WHERE `unbandate`<=UNIX_TIMESTAMP() AND `unbandate`<>`bandate`");
