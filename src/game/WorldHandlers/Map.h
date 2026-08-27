@@ -309,7 +309,29 @@ class Map : public GridRefManager<NGridType>
         void RegisterZoneMapTracked(Creature* tracked);
         void UnregisterZoneMapTracked(Creature* tracked);
         void SendInitZoneMapTracked(Player* player);
-        void AnnounceZoneMapTracked(Creature* tracked);
+
+        /**
+         * @brief WHO IS TOLD. The one axis along which the deck/shore couriers differ.
+         *
+         * They used to differ along the wrong one -- each new kind of thing that had to
+         * cross the boundary grew its own function, so the vessel had a courier, the crew
+         * had a courier, the map icons had a courier, and a passenger had none, which is
+         * why boarding was invisible from the pier. The subject never varied. This did.
+         */
+        enum class Audience
+        {
+            Here,         ///< the players on this map -- on a deck, the ones aboard
+            ShoreWatch,   ///< the observers ashore, as this tick gathered them; none inland
+            Voyage,       ///< Here + ShoreWatch: everyone who can see this ship at all
+            AnchorAll,    ///< every player on the world map this one anchors to, no distance
+        };
+
+        void CollectAudience(Audience who, std::vector<Player*>& out);
+
+        /// Send one object's create block to an audience. Create only, deliberately: a
+        /// destroy is either forbidden (a zone-map icon) or the vessel's own business
+        /// (RelayVessel), and neither belongs behind a bool nobody would read.
+        void Relay(Audience who, WorldObject* subject);
 
         /// Create blocks for this map's tracked units, appended for one observer.
         void AppendZoneMapTrackedBlocks(UpdateData& data, Player* observer);
@@ -410,10 +432,6 @@ class Map : public GridRefManager<NGridType>
          * the boundary itself.
          */
         std::vector<Player*> const& ExternalObservers() const { return m_externalObservers; }
-        void SetExternalObservers(std::vector<Player*>&& observers)
-        {
-            m_externalObservers = std::move(observers);
-        }
 
         void CreateInstanceData(bool load);
         InstanceData* GetInstanceData() const { return i_data; }
@@ -560,6 +578,10 @@ class Map : public GridRefManager<NGridType>
         MapEntry const* i_mapEntry;
 
         /// Players off this map who must hear it -- see ExternalObservers().
+        /// Written by TransportMap::GatherObservers alone -- it is the one thing that
+        /// knows who is watching -- and read through ExternalObservers/CollectAudience.
+        /// It had a public setter with exactly that one caller, which only made the
+        /// invariant look negotiable.
         std::vector<Player*> m_externalObservers;
         uint8 i_spawnMode;
         uint32 i_id;

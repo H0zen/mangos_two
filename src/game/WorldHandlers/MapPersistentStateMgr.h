@@ -67,7 +67,7 @@ class MapPersistentState
 {
         friend class MapPersistentStateManager;
     protected:
-        MapPersistentState(uint16 MapId, uint32 InstanceId, Difficulty difficulty);
+        MapPersistentState(uint32 MapId, uint32 InstanceId, Difficulty difficulty);
 
     public:
 
@@ -140,6 +140,12 @@ class MapPersistentState
         typedef std::unordered_map<uint32, time_t> RespawnTimes;
 
         uint32 m_instanceid;
+
+        /// uint32, and every constructor down the chain takes it as one. It used to be
+        /// narrowed to uint16 at each of them from MapEntry::ID, which is a uint32 --
+        /// lossless only because 3.3.5a happens to stop below 1000. A vessel's hull is a
+        /// map like any other and goes through here; nothing about it should depend on the
+        /// highest map id Blizzard shipped.
         uint32 m_mapid;
         Difficulty m_difficulty;
         Map* m_usedByMap;                                   // NULL if map not loaded, non-NULL lock MapPersistentState from unload
@@ -163,7 +169,7 @@ class WorldPersistentState : public MapPersistentState
            - any new non-instanceable map created
            - respawn data loading for non-instanceable map
         */
-        explicit WorldPersistentState(uint16 MapId) : MapPersistentState(MapId, 0, REGULAR_DIFFICULTY) {}
+        explicit WorldPersistentState(uint32 MapId) : MapPersistentState(MapId, 0, REGULAR_DIFFICULTY) {}
 
         ~WorldPersistentState() {}
 
@@ -191,7 +197,7 @@ class DungeonPersistentState : public MapPersistentState
            - any new instance is being generated
            - the first time a player bound to InstanceId logs in
            - when a group bound to the instance is loaded */
-        DungeonPersistentState(uint16 MapId, uint32 InstanceId, Difficulty difficulty, time_t resetTime, bool canReset, uint32 completedEncountersMask);
+        DungeonPersistentState(uint32 MapId, uint32 InstanceId, Difficulty difficulty, time_t resetTime, bool canReset, uint32 completedEncountersMask);
 
         ~DungeonPersistentState();
 
@@ -265,7 +271,7 @@ class BattleGroundPersistentState : public MapPersistentState
         /* Created either when:
            - any new BG/arena is being generated
         */
-        BattleGroundPersistentState(uint16 MapId, uint32 InstanceId, Difficulty difficulty)
+        BattleGroundPersistentState(uint32 MapId, uint32 InstanceId, Difficulty difficulty)
             : MapPersistentState(MapId, InstanceId, difficulty) {}
 
         ~BattleGroundPersistentState() {}
@@ -299,7 +305,7 @@ struct DungeonResetEvent
 {
     ResetEventType type   : 8;                              // if RESET_EVENT_NORMAL_DUNGEON then InstanceID == 0 and applied to all instances for pair (map,diff)
     Difficulty difficulty : 8;                              // used with mapid used as for select reset for global cooldown instances (instamceid==0 for event)
-    uint16 mapid;                                           // used with mapid used as for select reset for global cooldown instances (instanceid==0 for event)
+    uint32 mapid;                                           // used with mapid used as for select reset for global cooldown instances (instanceid==0 for event)
     uint32 instanceId;                                      // used for select reset for normal dungeons
 
     DungeonResetEvent() : type(RESET_EVENT_NORMAL_DUNGEON), difficulty(DUNGEON_DIFFICULTY_NORMAL), mapid(0), instanceId(0) {}
