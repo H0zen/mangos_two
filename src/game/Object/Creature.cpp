@@ -288,7 +288,7 @@ void Creature::AddToWorld()
     if (IsTrackedOnZoneMap())
     {
         GetMap()->RegisterZoneMapTracked(this);
-        GetMap()->AnnounceZoneMapTracked(this);
+        GetMap()->Relay(Map::Audience::AnchorAll, this);
     }
 
     // Make active if required

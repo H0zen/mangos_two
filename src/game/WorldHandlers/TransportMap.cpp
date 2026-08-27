@@ -394,7 +394,7 @@ bool TransportMap::Add(Player* passenger)
             {
                 if (other != m_vessel && other->GetMap() == sailed)
                 {
-                    AnnounceVessel(other, passenger);
+                    RelayVessel(other, passenger, true);
                 }
             }
         }
@@ -415,7 +415,7 @@ bool TransportMap::Add(Player* passenger)
     // watched him walk up the gangway are on another one, and Map::Remove already gave them
     // his destroy. Without this they lose him until their own sweep comes round -- he
     // vanishes off the deck and pops back a second later.
-    AnnounceAboard(passenger);
+    Relay(Audience::Voyage, passenger);
 
     return true;
 }
@@ -490,7 +490,7 @@ void TransportMap::VesselLeavingWorld(Map* oldWorld, uint32 newMapId,
     {
         if (Player* leaving = itr->getSource())
         {
-            RetractVessel(m_vessel, leaving);
+            RelayVessel(m_vessel, leaving, false);
         }
     }
 
@@ -534,7 +534,7 @@ void TransportMap::VesselEnteredWorld(Map* newWorld)
     {
         if (Player* found = itr->getSource())
         {
-            AnnounceVessel(m_vessel, found);
+            RelayVessel(m_vessel, found, true);
         }
     }
 }
@@ -583,7 +583,7 @@ void TransportMap::EnlistCrew(Creature* crew)
     // Same event, same audience. At start-up there is nobody in either list and this costs
     // nothing; mid-voyage it is what makes `.trans npc add` land in front of an audience
     // instead of waiting for everyone to move.
-    AnnounceAboard(crew);
+    Relay(Audience::Voyage, crew);
 }
 
 void TransportMap::DelistCrew(Creature* crew)
@@ -644,104 +644,57 @@ void TransportMap::UpdateMinions()
 
 /* ******************************** What the shore is told ***************************** */
 
-void TransportMap::AppendCrewCreateBlocks(UpdateData& data, Player* observer)
+void TransportMap::AppendCrewBlocks(UpdateData& data, Player* observer, bool give)
 {
     for (Creature* crew : m_crew)
     {
-        if (crew->IsInWorld())
+        if (give)
         {
-            crew->BuildCreateUpdateBlockForPlayer(&data, observer);
+            if (crew->IsInWorld())
+            {
+                crew->BuildCreateUpdateBlockForPlayer(&data, observer);
+            }
+        }
+        else
+        {
+            crew->BuildOutOfRangeUpdateBlock(&data);
         }
     }
 }
 
-void TransportMap::AppendCrewDestroyBlocks(UpdateData& data)
-{
-    for (Creature* crew : m_crew)
-    {
-        crew->BuildOutOfRangeUpdateBlock(&data);
-    }
-}
-
-void TransportMap::AnnounceAboard(WorldObject* arrival)
-{
-    if (!arrival || !arrival->IsInWorld())
-    {
-        return;
-    }
-
-    // Ashore first, then aboard. Both lists are empty during Commission(), when the deck's
-    // creatures load before the hull has a map at all -- so this is a no-op then, which is
-    // the right answer: there is nobody to tell.
-    std::vector<Player*> audience = ExternalObservers();
-
-    PlayerList const& aboard = GetPlayers();
-    for (PlayerList::const_iterator itr = aboard.begin(); itr != aboard.end(); ++itr)
-    {
-        if (Player* mate = itr->getSource())
-        {
-            audience.push_back(mate);
-        }
-    }
-
-    for (Player* observer : audience)
-    {
-        // He does not need to be told about himself: his own create block reached him
-        // ahead of the vessel's, which is the one ordering that matters here.
-        if (observer == arrival || !observer->IsInWorld())
-        {
-            continue;
-        }
-
-        UpdateData data;
-        arrival->BuildCreateUpdateBlockForPlayer(&data, observer);
-
-        WorldPacket packet;
-        data.BuildPacket(&packet, true);
-        observer->SendDirectMessage(&packet);
-    }
-}
-
-void TransportMap::AnnounceVessel(Transport* vessel, Player* observer)
+void TransportMap::RelayVessel(Transport* vessel, Player* observer, bool give)
 {
     if (!vessel || !observer)
     {
         return;
     }
 
-    // The hull AND everyone on her. The observer's own visibility sweep would find the crew
-    // too, but only when HE moves -- and a man standing on a pier watching a ship come in
-    // does not move. Leaving it to the sweep gave him an empty deck until he stepped aboard.
+    // THE HULL'S PLACE IN THE PACKET IS THE WHOLE DIFFERENCE between the two directions.
+    // Giving her: she leads, because the crew's blocks name her guid and a client that does
+    // not hold her yet drops them at the origin of the world. Taking her away: she goes
+    // last, or the client loses the ship while it still holds them and they hang in the air
+    // at the spot it last drew her.
+    //
+    // The observer's own sweep would find the crew too, but only when HE moves -- and a man
+    // on a pier watching a ship come in does not move. Leaving it to the sweep gave him an
+    // empty deck until he stepped aboard.
     UpdateData data;
-    vessel->BuildCreateUpdateBlockForPlayer(&data, observer);
+    TransportMap* hull = vessel->AsMap();
 
-    if (TransportMap* hull = vessel->AsMap())
+    if (give)
     {
-        hull->AppendCrewCreateBlocks(data, observer);
+        vessel->BuildCreateUpdateBlockForPlayer(&data, observer);
     }
 
-    WorldPacket packet;
-    data.BuildPacket(&packet, true);
-    observer->SendDirectMessage(&packet);
-}
-
-void TransportMap::RetractVessel(Transport* vessel, Player* observer)
-{
-    if (!vessel || !observer)
+    if (hull)
     {
-        return;
+        hull->AppendCrewBlocks(data, observer, give);
     }
 
-    // The CREW FIRST, the hull last. Reversed, the client loses the ship while it still holds
-    // them, and they hang in the air at the last place it was drawn.
-    UpdateData data;
-
-    if (TransportMap* hull = vessel->AsMap())
+    if (!give)
     {
-        hull->AppendCrewDestroyBlocks(data);
+        vessel->BuildOutOfRangeUpdateBlock(&data);
     }
-
-    vessel->BuildOutOfRangeUpdateBlock(&data);
 
     WorldPacket packet;
     data.BuildPacket(&packet, true);
@@ -805,10 +758,9 @@ void TransportMap::CollectRelayAudience(WorldObject const* obj, std::vector<Play
     }
 
     // Aboard: the shore watch, gathered once a tick on everyone's behalf.
-    if (TransportMap* hull = on->AsTransport())
+    if (on->AsTransport())
     {
-        std::vector<Player*> const& ashore = hull->ExternalObservers();
-        out.insert(out.end(), ashore.begin(), ashore.end());
+        on->CollectAudience(Map::Audience::ShoreWatch, out);
         return;
     }
 
@@ -835,14 +787,7 @@ void TransportMap::CollectRelayAudience(WorldObject const* obj, std::vector<Play
             continue;
         }
 
-        PlayerList const& aboard = hull->GetPlayers();
-        for (PlayerList::const_iterator itr = aboard.begin(); itr != aboard.end(); ++itr)
-        {
-            if (Player* mate = itr->getSource())
-            {
-                out.push_back(mate);
-            }
-        }
+        hull->CollectAudience(Map::Audience::Here, out);
     }
 }
 
@@ -882,7 +827,7 @@ void TransportMap::GatherObservers()
     // For BROADCAST only -- a spline, an emote, a spell go, anything said aboard while
     // nobody's visibility pass happens to be running. Visibility itself is decided by each
     // viewer's own sweep, which reaches across through CollectRelaySources.
-    SetExternalObservers(std::vector<Player*>(found.begin(), found.end()));
+    m_externalObservers.assign(found.begin(), found.end());
 }
 
 void TransportMap::Update(const uint32& t_diff)

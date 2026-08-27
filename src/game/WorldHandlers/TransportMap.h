@@ -194,10 +194,19 @@ class TransportMap : public Map
         // possession is MAP MEMBERSHIP and it is edge-triggered: you have a vessel, and
         // everyone aboard her, for as long as you share the map she sails.
 
-        /// The vessel AND everyone on her. Static because a vessel the baker gave nothing to
-        /// has no map to ask, and is then exactly what the base class says it is.
-        static void AnnounceVessel(Transport* vessel, Player* observer);
-        static void RetractVessel(Transport* vessel, Player* observer);
+        /**
+         * @brief The vessel AND everyone on her, given to or taken from ONE observer.
+         *
+         * Static because a vessel the baker gave nothing to has no map to ask, and is then
+         * exactly what the base class says it is.
+         *
+         * One function rather than two: the two directions differ only in which end of the
+         * packet the hull goes. Handing her over, she comes first, because the crew's blocks
+         * name her guid and a client that does not hold her yet drops them at the origin of
+         * the world. Taking her away, she goes LAST, or the client loses the ship while it
+         * still holds them and they hang in the air where it last drew her.
+         */
+        static void RelayVessel(Transport* vessel, Player* observer, bool give);
 
         /**
          * @brief The cell sources a viewer's visibility pass must sweep BESIDES his own map.
@@ -225,28 +234,12 @@ class TransportMap : public Map
          */
         static void CollectRelayAudience(WorldObject const* obj, std::vector<Player*>& out);
 
-        /**
-         * @brief ONE object has just arrived aboard: tell everyone who is watching this ship.
-         *
-         * Arriving aboard is a single event whoever you are -- a deckhand boarded by
-         * `.trans npc add` mid-voyage, a passenger who walked up the gangway, a pet drawn
-         * across behind its master. The audience is the same in every case: the players
-         * already on this map, and the observers ashore.
-         *
-         * It exists because neither half of that audience is reached by anything else. A
-         * player ashore is not a camera on this map, so `Map::Add`'s visibility pass never
-         * touches him; his own sweep would find the arrival eventually, but only when he
-         * moves or when the periodic observer sweep comes round -- so a man on the pier
-         * watched his friend walk aboard, vanish, and reappear a second later.
-         */
-        void AnnounceAboard(WorldObject* arrival);
-
-        /// Append the crew's create blocks to a packet already carrying the vessel's.
-        /// Deliberately does NOT stamp m_clientGUIDs: they ride the vessel's map-membership
-        /// channel, and the elimination sweep -- the only thing that set feeds -- must never
-        /// learn they exist.
-        void AppendCrewCreateBlocks(UpdateData& data, Player* observer);
-        void AppendCrewDestroyBlocks(UpdateData& data);
+        /// Append the crew's blocks to a packet already carrying the vessel's. Deliberately
+        /// does NOT stamp m_clientGUIDs: they ride the vessel's map-membership channel, and
+        /// the elimination sweep -- the only thing that set feeds -- must never learn they
+        /// exist. `observer` is unused when taking them away; a destroy block is the same
+        /// bytes for everyone.
+        void AppendCrewBlocks(UpdateData& data, Player* observer, bool give);
 
     private:
         /**

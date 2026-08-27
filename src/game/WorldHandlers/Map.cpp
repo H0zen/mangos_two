@@ -1943,7 +1943,7 @@ void Map::SendInitSelf(Player* player)
         // who has just stepped aboard her.
         if (TransportMap* hull = transport->AsMap())
         {
-            hull->AppendCrewCreateBlocks(data, player);
+            hull->AppendCrewBlocks(data, player, true);
         }
     }
 
@@ -1970,7 +1970,7 @@ void Map::SendInitTransports(Player* player)
     // logging in aboard was handed no hull at all, which is a man standing in mid-air.
     if (TransportMap* hull = AsTransport())
     {
-        TransportMap::AnnounceVessel(hull->Vessel(), player);
+        TransportMap::RelayVessel(hull->Vessel(), player, true);
         return;
     }
 
@@ -1989,7 +1989,7 @@ void Map::SendInitTransports(Player* player)
             continue;
         }
 
-        TransportMap::AnnounceVessel(vessel, player);
+        TransportMap::RelayVessel(vessel, player, true);
     }
 }
 
@@ -2136,27 +2136,71 @@ void Map::SendInitZoneMapTracked(Player* player)
     player->SendDirectMessage(&packet);
 }
 
-void Map::AnnounceZoneMapTracked(Creature* tracked)
+void Map::CollectAudience(Audience who, std::vector<Player*>& out)
 {
-    Map* anchor = AnchorWorld();
-    if (!anchor || !tracked || !tracked->IsInWorld())
+    if (who == Audience::Here || who == Audience::Voyage)
+    {
+        PlayerList const& here = GetPlayers();
+        for (PlayerList::const_iterator itr = here.begin(); itr != here.end(); ++itr)
+        {
+            if (Player* mate = itr->getSource())
+            {
+                out.push_back(mate);
+            }
+        }
+    }
+
+    if (who == Audience::ShoreWatch || who == Audience::Voyage)
+    {
+        // Empty on a world map, and empty on a deck until GatherObservers has run once --
+        // which is exactly right during Commission(), when the crew load before anyone
+        // could possibly be looking.
+        std::vector<Player*> const& ashore = ExternalObservers();
+        out.insert(out.end(), ashore.begin(), ashore.end());
+    }
+
+    if (who == Audience::AnchorAll)
+    {
+        Map* anchor = AnchorWorld();
+        if (!anchor)
+        {
+            return;
+        }
+
+        // No test of any kind, which is the whole point: the player who needs to see a
+        // demolisher on his map is precisely the one who cannot see it yet.
+        PlayerList const& everyone = anchor->GetPlayers();
+        for (PlayerList::const_iterator itr = everyone.begin(); itr != everyone.end(); ++itr)
+        {
+            if (Player* observer = itr->getSource())
+            {
+                out.push_back(observer);
+            }
+        }
+    }
+}
+
+void Map::Relay(Audience who, WorldObject* subject)
+{
+    if (!subject || !subject->IsInWorld())
     {
         return;
     }
 
-    // Everyone on the anchor map, with no test of any kind. That is the whole point: the
-    // player who needs to see a demolisher on his map is the one who cannot see it yet.
-    PlayerList const& everyone = anchor->GetPlayers();
-    for (PlayerList::const_iterator itr = everyone.begin(); itr != everyone.end(); ++itr)
+    std::vector<Player*> audience;
+    CollectAudience(who, audience);
+
+    for (Player* observer : audience)
     {
-        Player* observer = itr->getSource();
-        if (!observer)
+        // Nobody is told about himself: his own create block reached him ahead of the
+        // vessel's, which is the one ordering that matters here.
+        if (observer == subject || !observer->IsInWorld())
         {
             continue;
         }
 
         UpdateData data;
-        tracked->BuildCreateUpdateBlockForPlayer(&data, observer);
+        subject->BuildCreateUpdateBlockForPlayer(&data, observer);
 
         WorldPacket packet;
         data.BuildPacket(&packet, true);
