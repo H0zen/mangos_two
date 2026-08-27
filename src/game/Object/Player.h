@@ -3667,10 +3667,6 @@ class Player : public Unit
         // Update the visibility of a target from a viewpoint
         void UpdateVisibilityOf(WorldObject const* viewPoint, WorldObject* target);
 
-        // Template function to update the visibility of a target from a viewpoint
-        template<class T>
-        void UpdateVisibilityOf(WorldObject const* viewPoint, T* target, UpdateData& data, std::set<WorldObject*>& visibleNow);
-
         // Handle detection of stealthed units
         void HandleStealthedUnitsDetection();
 
