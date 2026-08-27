@@ -42,16 +42,60 @@
 
 namespace MaNGOS
 {
+    /**
+     * @brief One visibility pass, expressed as a DELTA rather than as an elimination.
+     *
+     * The pass has two halves and they do not overlap. First every source is swept and
+     * each candidate is CONSIDERED -- a question with no side effects, which only records
+     * the guid in `i_should`. Then, once, the two sets are differenced: what is believed
+     * and no longer should be has vanished, what should be and is not yet believed has
+     * appeared. Nothing is sent, remembered or forgotten before that diff.
+     *
+     * It used to work the other way round: the sweep sent create blocks as it went and
+     * erased each guid it re-found from a copy of the belief set, and whatever was left in
+     * that copy at the end was declared out of range. Two things follow from the change.
+     *
+     * ONE DOOR OUT OF BELIEF. Elimination had two: an object the sweep never reached
+     * (a leftover, known only as a guid) and an object the sweep reached and rejected
+     * (stealth, phase -- known as an object). They destroyed through different code, so
+     * every refusal to destroy had to be written twice, and the guid-only door could not
+     * see the object-level guard at all.
+     *
+     * ORDER NO LONGER DECIDES. `i_should` is the UNION over every source visited: the
+     * observer's own cells, and -- across a vessel's boundary -- the far side's. Under
+     * elimination an object that one source accepted and another rejected was created or
+     * destroyed according to which source happened to run last. For a ship passing a pier,
+     * with the deck and the shore both being swept, that was a coin toss every tick.
+     */
     struct VisibleNotifier
     {
         Camera& i_camera;
         UpdateData i_data;
-        GuidSet i_clientGUIDs;
+
+        /// What the client is believed to hold as the pass begins. A snapshot, and the
+        /// sweep never touches it -- the diff at the end is between two whole sets.
+        GuidSet i_believed;
+
+        /// What the sweep concluded the client should hold, unioned over every source.
+        GuidSet i_should;
+
+        /// The `should \ believed` side of the diff, kept as pointers because the sweep
+        /// had them and a create block needs the object rather than the guid.
         std::set<WorldObject*> i_visibleNow;
 
-        explicit VisibleNotifier(Camera& c) : i_camera(c), i_clientGUIDs(c.GetOwner()->m_clientGUIDs) {}
+        explicit VisibleNotifier(Camera& c) : i_camera(c), i_believed(c.GetOwner()->m_clientGUIDs) {}
         template<class T> void Visit(GridRefManager<T>& m);
         void Visit(CameraMapType& /*m*/) {}
+
+        /**
+         * @brief Record one candidate. Asks a question; changes nothing.
+         *
+         * @param viewPoint is a parameter rather than the camera's body because a vessel's
+         *        own deck is answered for the player himself: farsight can put the camera
+         *        ashore, and a mate standing beside him is not less visible for it.
+         */
+        void Consider(WorldObject* target, WorldObject const* viewPoint);
+
         void Notify(void);
     };
 

@@ -56,9 +56,7 @@ class Camera
         // set view to camera's owner
         void ResetView(bool update_far_sight_field = true);
 
-        template<class T>
-        void UpdateVisibilityOf(T* obj, UpdateData& d, std::set<WorldObject*>& vis);
-        void UpdateVisibilityOf(WorldObject* obj);
+Camera.h template declaration
 
         void ReceivePacket(WorldPacket* data);
 

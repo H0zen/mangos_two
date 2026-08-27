@@ -55,6 +55,10 @@
 #include "PlayerRegistry.h"
 #include "BattleGround/BattleGroundMgr.h"
 #include "CreatureAI.h"
+#include "Pet.h"
+
+#include <algorithm>
+#include <iterator>
 
 using namespace MaNGOS;
 
@@ -72,60 +76,138 @@ void VisibleChangesNotifier::Visit(CameraMapType& m)
 }
 
 /**
- * @brief Finalizes visibility updates for a player camera and sends the resulting packets.
+ * @brief A transport gameobject is created and never remembered.
+ *
+ * The client keeps a transport for the life of the map, so the server holding a belief
+ * about one would only give the diff something to destroy. It is rebuilt every pass, which
+ * is what it has always been; everything else is remembered, and so everything else can
+ * vanish.
+ */
+static bool VisibilityIsRemembered(WorldObject const* target)
+{
+    return target->GetTypeId() != TYPEID_GAMEOBJECT ||
+           !static_cast<GameObject const*>(target)->IsTransport();
+}
+
+/**
+ * @brief The one side effect a vanishing object ever had beyond the bytes: a pet that
+ *        leaves its owner's belief is unsummoned.
+ *
+ * Asked on the GUID, not on a resolved object, and that is the point. The old test lived
+ * on the object-level destroy path only, so it could not run for a leftover at all, and
+ * resolving a leftover means a lookup on the observer's map -- which is the wrong map the
+ * moment owner and pet are on opposite sides of a vessel's boundary. The owner already
+ * knows his pet's guid; no map is consulted.
+ */
+static void UnsummonPetLeavingBelief(Player& player, ObjectGuid const& guid)
+{
+    if (player.GetPetGuid() != guid)
+    {
+        return;
+    }
+
+    if (Pet* pet = player.GetPet())
+    {
+        pet->Unsummon(PET_SAVE_REAGENTS);
+    }
+}
+
+/**
+ * @brief Records one candidate as something the client should hold. Sends nothing.
+ */
+void VisibleNotifier::Consider(WorldObject* target, WorldObject const* viewPoint)
+{
+    Player& player = *i_camera.GetOwner();
+
+    // The belief the client already holds is an INPUT to the question, not merely the thing
+    // its answer is compared against: what is already on screen is kept there by a laxer
+    // test than the one that put it there. That is this tree's hysteresis, and it survives
+    // the rewrite unchanged -- it is why the predicate takes `inVisibleList` at all.
+    if (!target->IsVisibleForInState(&player, viewPoint, player.HaveAtClient(target)))
+    {
+        return;
+    }
+
+    if (!VisibilityIsRemembered(target))
+    {
+        i_visibleNow.insert(target);
+        return;
+    }
+
+    i_should.insert(target->GetObjectGuid());
+
+    if (!player.HaveAtClient(target))
+    {
+        i_visibleNow.insert(target);
+    }
+}
+
+/**
+ * @brief Differences belief against the sweep, then sends what changed.
  */
 void VisibleNotifier::Notify()
 {
     Player& player = *i_camera.GetOwner();
-    // at this moment i_clientGUIDs have guids that not iterate at grid level checks
-    // but exist one case when this possible and object not out of range: transports
+
+    // A deck has no cells, so nobody aboard ever arrives from a cell visit. The vessel's
+    // own passengers are collected here instead, from her map's list, and then take part in
+    // exactly the same diff as everything the sweep found ashore.
     if (player.GetMap()->AsTransport())
     {
         Map::PlayerList const& aboard = player.GetMap()->GetPlayers();
         for (Map::PlayerList::const_iterator itr = aboard.begin(); itr != aboard.end(); ++itr)
         {
             Player* mate = itr->getSource();
-            if (mate && i_clientGUIDs.find(mate->GetObjectGuid()) != i_clientGUIDs.end())
+            if (mate && i_believed.find(mate->GetObjectGuid()) != i_believed.end())
             {
                 // ignore far sight case
                 mate->UpdateVisibilityOf(mate, &player);
-                player.UpdateVisibilityOf(&player, mate, i_data, i_visibleNow);
-                i_clientGUIDs.erase(mate->GetObjectGuid());
+                Consider(mate, &player);
             }
         }
     }
 
-    // Nothing here about the shore, or about a deck. Both arrived as ordinary candidates
-    // from the extra cell sources the camera swept, so they are already erased from the
-    // leftovers below by having been re-found -- which is what makes their out-of-range
-    // correct without anybody keeping a list.
+    // ===== THE DIFF =====
+    GuidSet vanished;
+    std::set_difference(i_believed.begin(), i_believed.end(),
+                        i_should.begin(), i_should.end(),
+                        std::inserter(vanished, vanished.begin()));
 
-    // THE LEFTOVERS SWEEP IS THE THIRD DOOR OUT, and the only one that works on bare
-    // guids -- so the refusal in BuildOutOfRangeUpdateBlock cannot reach it and has to be
-    // repeated here. It matters for the siege vehicles rather than the gunships: a
-    // demolisher is an ordinary grid creature, it IS in m_clientGUIDs, and every time its
-    // driver rode out of a watcher's cells this sweep took it off that watcher's zone map.
-    //
-    // Dropped from the packet, but still erased from m_clientGUIDs below: the server's
-    // bookkeeping stays honest, so coming back into range sends a fresh create, and the
-    // client's list dedups by guid rather than growing a second entry.
-    GuidSet outOfRange;
-    for (GuidSet::const_iterator itr = i_clientGUIDs.begin(); itr != i_clientGUIDs.end(); ++itr)
+    for (GuidSet::const_iterator itr = vanished.begin(); itr != vanished.end(); ++itr)
     {
+        UnsummonPetLeavingBelief(player, *itr);
+
+        // THE ONE DOOR OUT OF BELIEF, so the one place this refusal is written. A unit the
+        // client draws on the zone map is dropped from the belief set -- the bookkeeping
+        // stays honest, and coming back sends a fresh create -- but is never sent an
+        // out-of-range block, because that list empties on DESTROY and on nothing else.
+        // It matters for the siege vehicles rather than the gunships: a demolisher is an
+        // ordinary grid creature, so every time its driver rode out of a watcher's cells
+        // this is where its icon used to go.
         if (!player.GetMap()->IsZoneMapTrackedGuid(*itr))
         {
-            outOfRange.insert(*itr);
+            i_data.AddOutOfRangeGUID(*itr);
         }
-    }
 
-    // generate outOfRange for not iterate objects
-    i_data.AddOutOfRangeGUID(outOfRange);
-    for (GuidSet::iterator itr = i_clientGUIDs.begin(); itr != i_clientGUIDs.end(); ++itr)
-    {
         player.ForgetSeen(*itr);
 
-        DEBUG_FILTER_LOG(LOG_FILTER_VISIBILITY_CHANGES, "%s is out of range (no in active cells set) now for %s",
+        DEBUG_FILTER_LOG(LOG_FILTER_VISIBILITY_CHANGES, "%s vanished for %s",
                          itr->GetString().c_str(), player.GetGuidStr().c_str());
+    }
+
+    for (std::set<WorldObject*>::const_iterator itr = i_visibleNow.begin(); itr != i_visibleNow.end(); ++itr)
+    {
+        WorldObject* target = *itr;
+
+        target->BuildCreateUpdateBlockForPlayer(&i_data, &player);
+
+        if (VisibilityIsRemembered(target))
+        {
+            player.RememberSeen(target);
+        }
+
+        DEBUG_FILTER_LOG(LOG_FILTER_VISIBILITY_CHANGES, "%s appeared for %s",
+                         target->GetGuidStr().c_str(), player.GetGuidStr().c_str());
     }
 
     if (i_data.HasData())

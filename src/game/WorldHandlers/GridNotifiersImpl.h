@@ -39,10 +39,11 @@
 template<class T>
 inline void MaNGOS::VisibleNotifier::Visit(GridRefManager<T>& m)
 {
+    // Collection only. The cell walk no longer decides anything -- it hands each candidate
+    // to Consider and the single diff in Notify does the deciding, once, for all sources.
     for (typename GridRefManager<T>::iterator iter = m.begin(); iter != m.end(); ++iter)
     {
-        i_camera.UpdateVisibilityOf(iter->getSource(), i_data, i_visibleNow);
-        i_clientGUIDs.erase(iter->getSource()->GetObjectGuid());
+        Consider(iter->getSource(), i_camera.GetBody());
     }
 }
 

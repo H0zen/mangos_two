@@ -242,65 +242,6 @@ void Player::UpdateVisibilityOf(WorldObject const* viewPoint, WorldObject* targe
     }
 }
 
-template<class T>
-inline void UpdateVisibilityOf_helper(GuidSet& s64, T* target)
-{
-    s64.insert(target->GetObjectGuid());
-}
-
-template<>
-inline void UpdateVisibilityOf_helper(GuidSet& s64, GameObject* target)
-{
-    if (!target->IsTransport())
-    {
-        s64.insert(target->GetObjectGuid());
-    }
-}
-
-template<class T>
-void Player::UpdateVisibilityOf(WorldObject const* viewPoint, T* target, UpdateData& data, std::set<WorldObject*>& visibleNow)
-{
-    if (HaveAtClient(target))
-    {
-        if (!target->IsVisibleForInState(this, viewPoint, true))
-        {
-            BeforeVisibilityDestroy<T>(target, this);
-
-            ObjectGuid t_guid = target->GetObjectGuid();
-
-            target->BuildOutOfRangeUpdateBlock(&data);
-            ForgetSeen(target);
-
-            DEBUG_FILTER_LOG(LOG_FILTER_VISIBILITY_CHANGES, "UpdateVisibilityOf(TemplateV): %s is out of range for %s. Distance = %f", t_guid.GetString().c_str(), GetGuidStr().c_str(), Where().DistanceTo(target->Where()));
-        }
-    }
-    else
-    {
-        if (target->IsVisibleForInState(this, viewPoint, false))
-        {
-            visibleNow.insert(target);
-            target->BuildCreateUpdateBlockForPlayer(&data, this);
-
-            // The helper is a type dispatch, not a set insert: a transport gameobject is
-            // deliberately never stamped. So the reverse side is attached only if the
-            // helper actually agreed to remember it.
-            const std::size_t before = m_clientGUIDs.size();
-            UpdateVisibilityOf_helper(m_clientGUIDs, target);
-            if (m_clientGUIDs.size() != before)
-            {
-                target->AddObserver(GetObjectGuid());
-            }
-
-            DEBUG_FILTER_LOG(LOG_FILTER_VISIBILITY_CHANGES, "UpdateVisibilityOf(TemplateV): %s is visible now for %s. Distance = %f", target->GetGuidStr().c_str(), GetGuidStr().c_str(), Where().DistanceTo(target->Where()));
-        }
-    }
-}
-
-template void Player::UpdateVisibilityOf(WorldObject const* viewPoint, Player*        target, UpdateData& data, std::set<WorldObject*>& visibleNow);
-template void Player::UpdateVisibilityOf(WorldObject const* viewPoint, Creature*      target, UpdateData& data, std::set<WorldObject*>& visibleNow);
-template void Player::UpdateVisibilityOf(WorldObject const* viewPoint, Corpse*        target, UpdateData& data, std::set<WorldObject*>& visibleNow);
-template void Player::UpdateVisibilityOf(WorldObject const* viewPoint, GameObject*    target, UpdateData& data, std::set<WorldObject*>& visibleNow);
-template void Player::UpdateVisibilityOf(WorldObject const* viewPoint, DynamicObject* target, UpdateData& data, std::set<WorldObject*>& visibleNow);
 
 void WorldObject::DetachAllObservers()
 {
