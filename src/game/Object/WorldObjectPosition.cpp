@@ -350,20 +350,28 @@ bool CanBeSeen(WorldObject const& seen, WorldObject const& viewer)
     return false;
 }
 
-/// The object a proximity question must be asked from. A passenger has no pose the shore
-/// can measure against, so the vessel answers for him -- and its hull radius is added as
-/// slack, because he may stand anywhere on it.
-static WorldObject const& ProximityAnchor(WorldObject const& obj, float& slack)
+Geometry::Placement WorldObject::VisibilityPlacement(float& slack) const
 {
-    TransportMap* hull = obj.GetMap() ? obj.GetMap()->AsTransport() : NULL;
+    TransportMap* hull = GetMap() ? GetMap()->AsTransport() : NULL;
     Transport* vessel = hull ? hull->Vessel() : NULL;
 
     if (vessel)
     {
         slack += hull->HullRadius();
-        return *vessel;
+        return vessel->Where();
     }
-    return obj;
+
+    return Where();
+}
+
+/// The object a proximity question is asked from, when the caller needs the object and not
+/// just its pose -- SeenWithin uses it to spot the pair that shares a hull.
+static WorldObject const& ProximityAnchor(WorldObject const& obj)
+{
+    TransportMap* hull = obj.GetMap() ? obj.GetMap()->AsTransport() : NULL;
+    Transport* vessel = hull ? hull->Vessel() : NULL;
+
+    return vessel ? static_cast<WorldObject const&>(*vessel) : obj;
 }
 
 bool SeenWithin(WorldObject const& seen, WorldObject const& viewer, float dist, bool is3D)
@@ -379,18 +387,20 @@ bool SeenWithin(WorldObject const& seen, WorldObject const& viewer, float dist, 
         return seen.Where().WithinDist(viewer.Where(), dist, is3D);
     }
 
-    // Across a vessel's boundary. Whatever is aboard answers with its hull.
-    float slack = 0.0f;
-    WorldObject const& a = ProximityAnchor(seen, slack);
-    WorldObject const& b = ProximityAnchor(viewer, slack);
-
-    // One of them IS the anchor: he is standing on the very thing he is looking at.
-    if (&a == &b)
+    // Across a vessel's boundary: ask both sides the OTHER question, the one whose answer
+    // is in the frame the client is rendering.
+    if (&ProximityAnchor(seen) == &ProximityAnchor(viewer))
     {
+        // One of them IS the anchor, or they share a hull: he is standing on the very thing
+        // he is looking at, or on it beside him.
         return true;
     }
 
-    return a.Where().WithinDist(b.Where(), dist + slack, is3D);
+    float slack = 0.0f;
+    const Geometry::Placement a = seen.VisibilityPlacement(slack);
+    const Geometry::Placement b = viewer.VisibilityPlacement(slack);
+
+    return a.WithinDist(b, dist + slack, is3D);
 }
 
 bool InReach(WorldObject const& a, WorldObject const& b, float dist, bool is3D)
