@@ -746,6 +746,25 @@ class WorldObject : public Object
         virtual void CleanupsBeforeDelete();                // used in destructor or explicitly before mass creature delete to remove cross-references to already deleted units
 
         virtual void SendMessageToSet(WorldPacket* data, bool self) const;
+
+        /**
+         * @brief Deliver a broadcast across a vessel's boundary, in whichever direction this
+         *        object needs it.
+         *
+         * A deck and the water it sails are two maps, and no cell visit of one ever reaches
+         * the other. So a broadcast has to be sent twice: once to the map the object is
+         * filed under, and once across.
+         *
+         * THIS IS THE ONE PLACE THAT SECOND SEND IS WRITTEN. SendMessageToSet and
+         * SendMessageToSetExcept differ by a skipped receiver and by nothing else -- but
+         * they used to differ by this too, and only the first had it. Every movement packet
+         * goes out through the second. A player walking up a gangway was therefore drawn by
+         * the watchers' clients, because visibility does cross the boundary, and then never
+         * moved: he climbed on the spot, for everyone but himself.
+         *
+         * @param skipped receiver to leave out, or NULL.
+         */
+        void RelayAcrossHull(WorldPacket* data, Player const* skipped) const;
         virtual void SendMessageToSetInRange(WorldPacket* data, float dist, bool self) const;
         void SendMessageToSetExcept(WorldPacket* data, Player const* skipped_receiver) const;
 

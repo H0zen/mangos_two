@@ -415,6 +415,24 @@ bool Transport::IsVesselMapId(uint32 mapId)
     return s_vesselMapIds.find(mapId) != s_vesselMapIds.end();
 }
 
+Transport* Transport::VesselOfMapId(uint32 mapId)
+{
+    if (!IsVesselMapId(mapId))
+    {
+        return NULL;
+    }
+
+    for (Transport* vessel : sMapMgr.m_Transports)
+    {
+        if (vessel->VesselMapId() == mapId)
+        {
+            return vessel;
+        }
+    }
+
+    return NULL;
+}
+
 Transport* Transport::VesselOf(WorldObject const& obj)
 {
     // DERIVED, NEVER STORED. Being aboard is not a fact anyone records: it is what having
