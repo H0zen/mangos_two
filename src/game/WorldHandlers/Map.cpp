@@ -769,6 +769,7 @@ bool Map::Add(Player* player)
 
     SendInitSelf(player);
     SendInitTransports(player);
+    SendInitZoneMapTracked(player);
 
     NGridType* grid = getNGrid(cell.GridX(), cell.GridY());
     player->GetViewPoint().Event_AddedToWorld(&(*grid)(cell.CellX(), cell.CellY()));
@@ -1989,6 +1990,114 @@ void Map::SendInitTransports(Player* player)
         }
 
         TransportMap::AnnounceVessel(vessel, player);
+    }
+}
+
+Map* Map::AnchorWorld()
+{
+    // A deck has no observers of its own worth speaking of: the players who need the icon
+    // are ashore, on the map the vessel sails. Everywhere else a map is its own anchor.
+    if (TransportMap* hull = AsTransport())
+    {
+        Transport* vessel = hull->Vessel();
+        return vessel ? vessel->GetMap() : NULL;
+    }
+
+    return this;
+}
+
+void Map::RegisterZoneMapTracked(Creature* tracked)
+{
+    if (!tracked)
+    {
+        return;
+    }
+
+    if (std::find(m_zoneMapTracked.begin(), m_zoneMapTracked.end(), tracked) == m_zoneMapTracked.end())
+    {
+        m_zoneMapTracked.push_back(tracked);
+    }
+}
+
+void Map::UnregisterZoneMapTracked(Creature* tracked)
+{
+    m_zoneMapTracked.erase(std::remove(m_zoneMapTracked.begin(), m_zoneMapTracked.end(), tracked),
+                           m_zoneMapTracked.end());
+}
+
+void Map::AppendZoneMapTrackedBlocks(UpdateData& data, Player* observer)
+{
+    for (Creature* tracked : m_zoneMapTracked)
+    {
+        if (tracked->IsInWorld())
+        {
+            tracked->BuildCreateUpdateBlockForPlayer(&data, observer);
+        }
+    }
+}
+
+void Map::SendInitZoneMapTracked(Player* player)
+{
+    // This map's own -- the siege vehicles of a Wintergrasp or an Isle of Conquest.
+    UpdateData data;
+    AppendZoneMapTrackedBlocks(data, player);
+
+    // And every deck sailing it. A gunship's icon-carrying unit stands on the vessel's own
+    // map, so it is not in this map's list and no sweep of this map's cells will ever find
+    // it. SendInitTransports ran just before us and handed the player the hulls, so the
+    // transport guid these blocks name is already at his client.
+    MapManager::TransportsByMapType::const_iterator vessels = sMapMgr.m_TransportsByMap.find(i_id);
+    if (vessels != sMapMgr.m_TransportsByMap.end())
+    {
+        for (Transport* vessel : vessels->second)
+        {
+            if (vessel->GetMapId() != i_id)
+            {
+                continue;
+            }
+
+            if (TransportMap* hull = vessel->AsMap())
+            {
+                hull->AppendZoneMapTrackedBlocks(data, player);
+            }
+        }
+    }
+
+    if (!data.HasData())
+    {
+        return;
+    }
+
+    WorldPacket packet;
+    data.BuildPacket(&packet, true);
+    player->SendDirectMessage(&packet);
+}
+
+void Map::AnnounceZoneMapTracked(Creature* tracked)
+{
+    Map* anchor = AnchorWorld();
+    if (!anchor || !tracked || !tracked->IsInWorld())
+    {
+        return;
+    }
+
+    // Everyone on the anchor map, with no test of any kind. That is the whole point: the
+    // player who needs to see a demolisher on his map is the one who cannot see it yet.
+    PlayerList const& everyone = anchor->GetPlayers();
+    for (PlayerList::const_iterator itr = everyone.begin(); itr != everyone.end(); ++itr)
+    {
+        Player* observer = itr->getSource();
+        if (!observer)
+        {
+            continue;
+        }
+
+        UpdateData data;
+        tracked->BuildCreateUpdateBlockForPlayer(&data, observer);
+
+        WorldPacket packet;
+        data.BuildPacket(&packet, true);
+        observer->SendDirectMessage(&packet);
     }
 }
 
