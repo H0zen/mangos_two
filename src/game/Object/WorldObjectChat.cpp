@@ -314,9 +314,13 @@ void WorldObject::SendMessageToSet(WorldPacket* data, bool /*bToSelf*/) const
     // This once sent to the map the ship SAILS, from when passengers still lived there.
     // After they moved onto the deck the packets went to a map with nobody aboard on it,
     // and every deckhand stood frozen for the one player who could see him.
-    //
     GetMap()->MessageBroadcast(this, data);
 
+    RelayAcrossHull(data, NULL);
+}
+
+void WorldObject::RelayAcrossHull(WorldPacket* data, Player const* skipped) const
+{
     // THE RELAY, OUTBOUND. The people ashore are on another map and no cell of theirs will
     // ever hold this deckhand, so the same packet goes out again to the watchers the vessel
     // gathered at the top of this tick. Sent immediately: the deck runs INSIDE the tick of
@@ -327,7 +331,7 @@ void WorldObject::SendMessageToSet(WorldPacket* data, bool /*bToSelf*/) const
     {
         for (Player* observer : GetMap()->ExternalObservers())
         {
-            if (observer && observer->GetSession())
+            if (observer && observer != skipped && observer->GetSession())
             {
                 observer->GetSession()->SendPacket(data);
             }
@@ -364,7 +368,7 @@ void WorldObject::SendMessageToSet(WorldPacket* data, bool /*bToSelf*/) const
         for (Map::PlayerList::const_iterator itr = aboard.begin(); itr != aboard.end(); ++itr)
         {
             Player* passenger = itr->getSource();
-            if (passenger && passenger->GetSession())
+            if (passenger && passenger != skipped && passenger->GetSession())
             {
                 passenger->GetSession()->SendPacket(data);
             }
@@ -417,11 +421,15 @@ void WorldObject::SendMessageToSetInRange(WorldPacket* data, float dist, bool /*
 void WorldObject::SendMessageToSetExcept(WorldPacket* data, Player const* skipped_receiver) const
 {
     // if object is in world, map for it already created!
-    if (IsInWorld())
+    if (!IsInWorld())
     {
-        MaNGOS::MessageDelivererExcept notifier(this, data, skipped_receiver);
-        Cell::VisitWorldObjects(this, notifier, GetMap()->GetBroadcastRadius());
+        return;
     }
+
+    MaNGOS::MessageDelivererExcept notifier(this, data, skipped_receiver);
+    Cell::VisitWorldObjects(this, notifier, GetMap()->GetBroadcastRadius());
+
+    RelayAcrossHull(data, skipped_receiver);
 }
 
 void WorldObject::SendObjectDeSpawnAnim(ObjectGuid guid)

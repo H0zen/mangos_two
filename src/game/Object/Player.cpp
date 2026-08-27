@@ -1749,6 +1749,57 @@ bool Player::TeleportTo(uint32 mapid, float x, float y, float z, float orientati
         m_cinematicFlyover->Stop();
     }
 
+    // ===== A DESTINATION ABOARD A VESSEL =====
+    //
+    // The row is right. `.tele add` on a deck records the deck map's id and the deck point,
+    // and that pair is the truth -- it is the only description of that spot that stays true
+    // while the ship sails. What it is not is a WORLD destination, and everything below
+    // this line is one: Map.dbc has no row for a minted deck id, so the validity check
+    // rejects it, and no world position could be composed for it anyway.
+    //
+    // Arriving there is not teleporting, it is BOARDING, and boarding already has a
+    // mechanism -- the one that runs at every login on a ship. Use it exactly: the deck
+    // point becomes his transport data and the vessel becomes his transport, and then he is
+    // sent to the map she SAILS, at her own coarse pose. That world pose is a staging value
+    // with the lifetime of one packet: SMSG_NEW_WORLD names a map the client can actually
+    // load, and on the far side HandleMoveWorldportAckOpcode hands him to BoardingMap() --
+    // her hull -- whose Add reads the deck point back out and stands him on it.
+    if (Transport::IsVesselMapId(mapid))
+    {
+        Transport* vessel = Transport::VesselOfMapId(mapid);
+        TransportMap* hull = vessel ? vessel->AsMap() : NULL;
+
+        if (!hull || !hull->IsCommissioned())
+        {
+            sLog.outError("TeleportTo: %s named deck map %u, which no commissioned vessel "
+                          "carries.", GetGuidStr().c_str(), mapid);
+            return false;
+        }
+
+        // Off any OTHER deck first. The recursive call carries NOT_LEAVE_TRANSPORT, which
+        // is right for the vessel he is joining and would strand him on the one he is
+        // leaving.
+        if (m_transport && m_transport != vessel)
+        {
+            if (TransportMap* leaving = m_transport->AsMap())
+            {
+                leaving->Disembark(this, m_transport->Where().X(), m_transport->Where().Y(),
+                                   m_transport->Where().Z(), m_transport->Where().Facing());
+            }
+
+            m_transport = NULL;
+            m_movementInfo.ClearTransportData();
+        }
+
+        m_movementInfo.SetTransportData(vessel->GetObjectGuid(), x, y, z, orientation, 0, -1);
+        m_transport = vessel;
+
+        return TeleportTo(vessel->GetMapId(),
+                          vessel->Where().X(), vessel->Where().Y(),
+                          vessel->Where().Z(), vessel->Where().Facing(),
+                          options | TELE_TO_NOT_LEAVE_TRANSPORT, at);
+    }
+
     if (!MapManager::IsValidMapCoord(mapid, x, y, z, orientation))
     {
         sLog.outError("TeleportTo: invalid map %d or absent instance template.", mapid);

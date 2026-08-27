@@ -56,7 +56,7 @@ class Camera
         // set view to camera's owner
         void ResetView(bool update_far_sight_field = true);
 
-Camera.h template declaration
+        void UpdateVisibilityOf(WorldObject* obj);
 
         void ReceivePacket(WorldPacket* data);
 

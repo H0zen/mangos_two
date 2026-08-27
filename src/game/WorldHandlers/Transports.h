@@ -103,6 +103,10 @@ class Transport : public GameObject
         /// and must never be scheduled or unloaded with the rest.
         static bool IsVesselMapId(uint32 mapId);
 
+        /// The vessel whose deck map carries this id, or NULL. The inverse of VesselMapId,
+        /// for a stored location that names a deck -- a `game_tele` row saved aboard.
+        static Transport* VesselOfMapId(uint32 mapId);
+
         uint32 VesselMapId() const { return VesselMapIdOf(GetEntry()); }
 
         /// Pin every world grid the route passes through, at start-up and for good. The
