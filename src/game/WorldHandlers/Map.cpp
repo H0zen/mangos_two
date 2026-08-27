@@ -2000,7 +2000,14 @@ Map* Map::AnchorWorld()
     if (TransportMap* hull = AsTransport())
     {
         Transport* vessel = hull->Vessel();
-        return vessel ? vessel->GetMap() : NULL;
+
+        // FindMap, NOT GetMap: GetMap asserts, and this is reached before the vessel has a
+        // map at all. Commission() pins the route's grids from inside Transport::Create, so
+        // the deck's creatures load -- and announce themselves -- while the hull she stands
+        // on is still being built. Nobody can be watching yet, so answering "no anchor" is
+        // the truth rather than a fallback: the players who board or sail past later are
+        // served by SendInitZoneMapTracked instead.
+        return vessel ? vessel->FindMap() : NULL;
     }
 
     return this;
