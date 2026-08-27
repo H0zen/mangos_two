@@ -744,19 +744,33 @@ struct WorldObjectChangeAccumulator
  */
 void WorldObject::BuildUpdateData(UpdateDataMapType& update_players)
 {
-    WorldObjectChangeAccumulator notifier(*this, update_players);
-    Cell::VisitWorldObjects(this, notifier, GetMap()->GetBroadcastRadius());
-
-    // ACROSS A VESSEL'S BOUNDARY. The visit above walks cells on this object's own map, and
-    // a deck and the shore it sails past are two maps -- so on that route a value change
-    // never crosses, in either direction. No HaveAtClient test here on purpose: the people
-    // on the far side hold this object through the vessel's map-membership channel, which
-    // deliberately leaves no mark in the set that test reads.
-    std::vector<Player*> across;
-    TransportMap::CollectRelayAudience(this, across);
-    for (Player* observer : across)
+    // ===== A LOOKUP, NOT A SEARCH =====
+    //
+    // This used to sweep the cells around the object and test HaveAtClient on every camera
+    // it found -- asking "who is near me, and of those, who has me?" in order to answer
+    // "who has me?". The question was always the second one, and now there is an index that
+    // answers it: WorldObject::Observers, written by Player::RememberSeen/ForgetSeen.
+    //
+    // The sweep was also WRONG, not merely slow, and in a way no radius could fix: it walks
+    // cells on THIS object's map, and a deck and the shore it sails past are two maps. A
+    // deckhand killed at sea stayed standing for everyone ashore; a quest giver on the pier
+    // stayed frozen for everyone aboard. That took a second, parallel path bolted on beside
+    // the sweep to paper over. Reading the index needs neither -- an observer is an
+    // observer whatever map it woke up on.
+    //
+    // Self first: with the camera system, a player's own camera can be too far from his
+    // body to be found by any sweep of it, so his own field changes went missing.
+    if (isType(TYPEMASK_PLAYER))
     {
-        if (observer != this && observer->IsInWorld())
+        BuildUpdateDataForPlayer((Player*)this, update_players);
+    }
+
+    for (ObjectGuid const& guid : Observers())
+    {
+        // Advisory index: a guid may name someone who has logged out since. Resolve, skip
+        // what is gone, and let the leftovers sweep tidy the entry.
+        Player* observer = ObjectMgr::GetPlayer(guid);
+        if (observer && observer != this)
         {
             BuildUpdateDataForPlayer(observer, update_players);
         }

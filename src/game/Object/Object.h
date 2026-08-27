@@ -764,6 +764,42 @@ class WorldObject : public Object
         void RemoveFromClientUpdateList() override;
         void BuildUpdateData(UpdateDataMapType&) override;
 
+        /**
+         * @brief Who holds a create block for THIS object -- the reverse of
+         *        Player::m_clientGUIDs.
+         *
+         * ===== THE DIRECTION THIS TREE NEVER HAD =====
+         *
+         * `m_clientGUIDs` answers "what does this player believe exists". Broadcasting
+         * needs the opposite question -- "who must be told this creature moved, died,
+         * changed a field" -- and there was no way to ask it. So every broadcast swept
+         * cells around the object and then tested HaveAtClient on each camera it found: a
+         * search standing in for a lookup, and one that answers WRONGLY the moment subject
+         * and observer are on different maps. A deck and the shore it sails past are two
+         * maps, no cell visit of one reaches the other, and value updates crossed in
+         * neither direction until a relay was bolted on beside the sweep.
+         *
+         * A creature cannot borrow the forward set, because a creature observes nothing.
+         *
+         * Guids rather than pointers: an observer that goes away leaves a harmless stale
+         * guid here instead of a dangling pointer.
+         *
+         * ADVISORY, NOT AUTHORITATIVE. A guid in here may name a player who has logged out
+         * or crossed to a map this object cannot see -- so every consumer resolves and
+         * skips what it cannot find. What the index guarantees is the useful direction: an
+         * observer that DOES hold a create block is in here. It never misses one.
+         */
+        GuidSet const& Observers() const { return m_observers; }
+
+        /// ONLY Player::RememberSeen / ForgetSeen may call these. They own the pairing, and
+        /// two places deciding who sees what is how the two stop agreeing.
+        void AddObserver(ObjectGuid observer) { m_observers.insert(observer); }
+        void RemoveObserver(ObjectGuid observer) { m_observers.erase(observer); }
+
+        /// Every observer forgets this object at once -- it is leaving the world, and the
+        /// forward sets are corrected from here rather than waiting for each one's sweep.
+        void DetachAllObservers();
+
         Creature* SummonCreature(uint32 id, float x, float y, float z, float ang, TempSpawnType spwtype, uint32 despwtime, bool asActiveObject = false, bool setRun = false);
         GameObject* SummonGameObject(uint32 id, float x, float y, float z, float angle, uint32 despwtime);
 
@@ -833,6 +869,10 @@ class WorldObject : public Object
 
         Geometry::Placement m_placement;
         ViewPoint m_viewPoint;
+
+        /// The reverse of Player::m_clientGUIDs -- see Observers().
+        GuidSet m_observers;
+
         WorldUpdateCounter m_updateTracker;
         bool m_isActiveObject;
         float m_visibilityDistanceOverride;

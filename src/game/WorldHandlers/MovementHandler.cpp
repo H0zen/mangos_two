@@ -179,7 +179,7 @@ void WorldSession::HandleMoveWorldportAckOpcode()
     // listed here will be skipped by UpdateVisibilityOf and never sent again. That
     // includes the vessel he is standing on, which exists on both sides of the seam and so
     // keeps its guid across it.
-    GetPlayer()->m_clientGUIDs.clear();
+    GetPlayer()->ForgetEverythingSeen();
 
     GetPlayer()->SendInitialPacketsBeforeAddToMap();
     // the CanEnter checks are done in TeleporTo but conditions may change

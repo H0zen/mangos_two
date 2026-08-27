@@ -139,7 +139,7 @@ namespace
         }
 
         minion->DestroyForPlayer(client);
-        client->m_clientGUIDs.erase(minion->GetObjectGuid());
+        client->ForgetSeen(minion);
     }
 
     /**
@@ -746,48 +746,6 @@ void TransportMap::CollectRelaySources(WorldObject const* viewer, float visibili
         // The whole ship, swept from her origin. Her space is small and a crew is a few
         // dozen, so a radius that certainly covers the hull is cheaper than being exact.
         out.push_back({hull, 0.0f, 0.0f, hull->HullRadius() * 2.0f + visibility});
-    }
-}
-
-void TransportMap::CollectRelayAudience(WorldObject const* obj, std::vector<Player*>& out)
-{
-    Map* on = obj ? obj->FindMap() : NULL;
-    if (!on)
-    {
-        return;
-    }
-
-    // Aboard: the shore watch, gathered once a tick on everyone's behalf.
-    if (on->AsTransport())
-    {
-        on->CollectAudience(Map::Audience::ShoreWatch, out);
-        return;
-    }
-
-    // Ashore: the passengers of every vessel near enough to be looking. Most maps carry no
-    // vessel at all and stop at the lookup; Icecrown carries two.
-    MapManager::TransportsByMapType::const_iterator vessels =
-        sMapMgr.m_TransportsByMap.find(on->GetId());
-    if (vessels == sMapMgr.m_TransportsByMap.end())
-    {
-        return;
-    }
-
-    for (Transport* vessel : vessels->second)
-    {
-        TransportMap* hull = vessel->AsMap();
-        if (!hull || vessel->FindMap() != on)
-        {
-            continue;
-        }
-
-        const float reach = on->GetVisibilityDistance() + hull->HullRadius() + vessel->NodeSlack();
-        if (!vessel->Where().WithinDist(obj->Where(), reach, false))
-        {
-            continue;
-        }
-
-        hull->CollectAudience(Map::Audience::Here, out);
     }
 }
 
