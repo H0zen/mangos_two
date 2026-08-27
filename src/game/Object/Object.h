@@ -688,6 +688,37 @@ class WorldObject : public Object
         /// component: obj->Where().DistanceTo(other->Where()).
         Geometry::Placement const& Where() const { return m_placement; }
 
+        /**
+         * @brief Where this object is FOR THE PURPOSE OF BEING SEEN, and by whom.
+         *
+         * ===== TWO QUESTIONS, AND THEY ARE NOT THE SAME QUESTION =====
+         *
+         * `Where()` is the precise one: close enough to hit, to loot, to cast at. It
+         * refuses a cross-frame pair outright -- a passenger and somebody ashore are
+         * infinitely far apart, because there is no honest answer at that precision.
+         * Failing closed there is correct, and it is what the spatial boundary test exists
+         * to protect.
+         *
+         * VISIBILITY IS THE OTHER QUESTION and the same refusal is wrong for it. A ship
+         * sails past a pier: everybody aboard and everybody ashore can see each other, and
+         * they must, or a deck of people is invisible from ten yards away. So this answers
+         * in the frame the observer's CLIENT is rendering -- the world map the vessel
+         * sails. A passenger is answered for by the hull, because he has no pose the shore
+         * could measure against; the slack is the hull's radius, since he may be standing
+         * anywhere on it.
+         *
+         * Two ships in one grid fall out of the same rule with no special case: both sets
+         * of passengers are anchored to their own hulls, both hulls are in the world frame,
+         * and one comparison covers ship-to-shore, shore-to-shore and ship-to-ship.
+         *
+         * @param slack added to, never assigned -- callers accumulate it over both sides.
+         *
+         * This distinction was hidden inside SeenWithin as an unnamed special case. It is
+         * out here because the two questions were confused once already, and a hidden case
+         * cannot be got right by a caller who does not know it is there.
+         */
+        Geometry::Placement VisibilityPlacement(float& slack) const;
+
         /// Mutation of the pose. Movement drives this; nobody else should need it.
         Geometry::Placement& Place() { return m_placement; }
 
