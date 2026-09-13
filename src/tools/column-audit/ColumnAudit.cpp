@@ -436,5 +436,15 @@ int main(int argc, char** argv)
 
     std::printf("================ total ================\n\n");
     Report("ALL", total);
+
+    const double n = double(probes.size() ? probes.size() : 1);
+    std::printf("================ cost of one ColumnAt ================\n\n");
+    std::printf("  engine window (z+%.0f .. z-%.0f) : %8.3f us/call, %6.2f surfaces/call\n",
+                ENGINE_LIFT, ENGINE_DOWN, double(narrowNs) / n / 1000.0,
+                double(narrowSurfaces) / n);
+    std::printf("  full sweep    (top .. bottom)   : %8.3f us/call, %6.2f surfaces/call\n",
+                double(fullNs) / n / 1000.0, double(fullSurfaces) / n);
+    std::printf("\n  total wall time in ColumnAt: engine %.2f s, full %.2f s over %zu probes\n",
+                double(narrowNs) / 1e9, double(fullNs) / 1e9, probes.size());
     return 0;
 }
