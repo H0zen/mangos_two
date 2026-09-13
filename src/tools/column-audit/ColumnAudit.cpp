@@ -351,7 +351,7 @@ int main(int argc, char** argv)
     FusedTerrain::SetTileDir(tileDir);
     if (!goDir.empty())
     {
-        world::terrain::GoModelStore::SetModelDir(goDir);
+        world::terrain::GoModelStore::Instance().SetDirectory(goDir);
     }
 
     std::vector<Probe> probes;
