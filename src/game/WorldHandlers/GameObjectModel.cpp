@@ -104,13 +104,20 @@ float GameObjectModel::SegmentHitFraction(const Vector3& a, const Vector3& b) co
 void GameObjectModel::AddSurfaces(float x, float y, float zTop, float zBottom,
                                   world::terrain::Column& out) const
 {
-    if (!m_collidable || !m_model || !m_bounds.coversColumn(x, y) ||
-        m_bounds.hi.z < zBottom || m_bounds.lo.z > zTop)
+    if (!m_collidable || !m_model || !m_bounds.coversColumn(x, y))
     {
         return;
     }
 
-    const Vector3 originWorld{x, y, zTop};
+    // Swept over this object's OWN extent, not the caller's window, for the same reason
+    // the baked instances are: a window that reaches into the gather makes the column a
+    // function of who asked. A lift standing above a player's 50-yard box is not absent
+    // from the world, and a selection that walks upward -- the ceiling over a point, the
+    // blocker between a point and a water surface -- needs it to be in the column.
+    const float sweepTop = std::max(zTop, m_bounds.hi.z + 1.f);
+    const float sweepBottom = std::min(zBottom, m_bounds.lo.z - 1.f);
+
+    const Vector3 originWorld{x, y, sweepTop};
     const Vector3 downWorld{0.f, 0.f, -1.f};
     const Vector3 originLocal = m_xf.worldToLocal(originWorld);
     const Vector3 dirLocal = m_xf.worldToLocalDirection(downWorld);
@@ -119,9 +126,9 @@ void GameObjectModel::AddSurfaces(float x, float y, float zTop, float zBottom,
     // whatever this object's scale.
     thread_local std::vector<float> hits;
     hits.clear();
-    m_model->RaycastAll(originLocal, dirLocal, zTop - zBottom, hits);
+    m_model->RaycastAll(originLocal, dirLocal, sweepTop - sweepBottom, hits);
     for (const float t : hits)
     {
-        out.AddSolid(zTop - t, world::terrain::SurfaceKind::Live);
+        out.AddSolid(sweepTop - t, world::terrain::SurfaceKind::Live);
     }
 }

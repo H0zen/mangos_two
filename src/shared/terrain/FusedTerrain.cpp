@@ -295,8 +295,6 @@ namespace world::terrain
             }
         }
 
-        const float span = zTop - zBottom;
-        const Vec3 originWorld{x, y, zTop};
         const Vec3 downWorld{0.0f, 0.0f, -1.0f};
 
         std::vector<float> hits;
@@ -311,28 +309,47 @@ namespace world::terrain
                     continue;
                 }
                 const Aabb& wb = inst.worldBounds;
-                if (!wb.coversColumn(x, y) || wb.hi.z < zBottom || wb.lo.z > zTop + 0.1f)
+                if (!wb.coversColumn(x, y))
                 {
                     continue;
                 }
+
+                // The instance is swept over its OWN extent, not the caller's window.
+                //
+                // The window used to be a filter on what got gathered, and that made the
+                // column a function of who was asking: a caller probing a 50-yard box
+                // around a player got a column with the building's other floors missing,
+                // not because they are not there but because nothing looked. Measured
+                // over the world database's own spawns, 36% of them had at least one
+                // solid surface hidden this way, and on instance maps it was over 99%.
+                //
+                // A gather that answers differently depending on the question cannot be
+                // selected over honestly, so the window no longer reaches this far in.
+                // Callers still bound their own selections -- Floor(z), LowestSolidAbove
+                // and the rest all take the height they care about -- and those are
+                // unaffected by surfaces they were never going to return.
+                const float sweepTop = std::max(zTop, wb.hi.z + 1.0f);
+                const float sweepBottom = std::min(zBottom, wb.lo.z - 1.0f);
+                const Vec3 sweepOrigin{x, y, sweepTop};
 
                 // Every instance -- a map's global WMO included -- stores its model in
                 // model space plus a placement. A global WMO's placement is NOT identity:
                 // it carries the half-turn about Z, so raycasting the raw model in world
                 // space misses the floor on every global-WMO map but the one whose
                 // placement happens to be identity.
-                const Vec3 originLocal = inst.xf.worldToLocal(originWorld);
+                const Vec3 originLocal = inst.xf.worldToLocal(sweepOrigin);
                 const Vec3 dirLocal = inst.xf.worldToLocalDirection(downWorld);
 
-                // localToWorld(o + t*d) == originWorld + t*downWorld, so t is already a
+                // localToWorld(o + t*d) == sweepOrigin + t*downWorld, so t is already a
                 // world distance whatever the instance scale.
                 if (wantStatic)
                 {
                     hits.clear();
-                    inst.model->RaycastAll(originLocal, dirLocal, span, hits);
+                    inst.model->RaycastAll(originLocal, dirLocal, sweepTop - sweepBottom,
+                                           hits);
                     for (const float t : hits)
                     {
-                        column.AddSolid(zTop - t, SurfaceKind::Static);
+                        column.AddSolid(sweepTop - t, SurfaceKind::Static);
                     }
                 }
 
@@ -345,7 +362,7 @@ namespace world::terrain
                 // and Y alone, and every real placement is a Z-rotation plus a
                 // translation, so which height along the column it is taken from cannot
                 // change the pair those come out as.
-                const Vec3 pointLocal = inst.xf.worldToLocal(originWorld);
+                const Vec3 pointLocal = inst.xf.worldToLocal(sweepOrigin);
                 liquids.clear();
                 inst.model->LiquidsLocal(pointLocal, liquids);
                 for (const ICollisionModel::LocalLiquid& local : liquids)
