@@ -118,6 +118,8 @@ namespace world::terrain
                 return LowestSolidAbove(z + tolerance);
             }
 
+            /// Every liquid in the column, highest first. "What liquid exists here",
+            /// with no point of view -- the answer a map-wide question wants.
             std::optional<Surface> HighestLiquid() const
             {
                 std::optional<Surface> best;
@@ -131,7 +133,55 @@ namespace world::terrain
                 return best;
             }
 
+            /// The liquid a point at `z` is actually in, or under, or standing above.
+            ///
+            /// The selection HighestLiquid cannot make: a surface only counts when no
+            /// solid lies between the point and it. Water over the roof above your head
+            /// is someone else's water -- a player on a dry floor inside Undercity would
+            /// otherwise be handed the Tirisfal lake eighty yards overhead and drown
+            /// standing up. The same test in the other direction discards a canal one
+            /// storey below the walkway you are on.
+            ///
+            /// Ties go to the liquid, so a point exactly level with a floor that is also
+            /// a water surface is still in the water.
+            std::optional<Surface> LiquidOver(float z) const
+            {
+                std::optional<Surface> best;
+                for (const Surface& s : m_surfaces)
+                {
+                    if (s.kind != SurfaceKind::Liquid)
+                    {
+                        continue;
+                    }
+                    if (best && s.z <= best->z)
+                    {
+                        continue;
+                    }
+                    if (!Reaches(z, s.z))
+                    {
+                        continue;
+                    }
+                    best = s;
+                }
+                return best;
+            }
+
         private:
+            /// Is the open interval between the two heights free of solid surfaces?
+            bool Reaches(float from, float to) const
+            {
+                const float lo = from < to ? from : to;
+                const float hi = from < to ? to : from;
+                for (const Surface& s : m_surfaces)
+                {
+                    if (s.Solid() && s.z > lo && s.z < hi)
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            }
+
             std::vector<Surface> m_surfaces;
     };
 }

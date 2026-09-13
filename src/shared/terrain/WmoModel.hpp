@@ -44,7 +44,7 @@ namespace world::terrain
 
         ModelKind Kind() const override { return ModelKind::Wmo; }
 
-        std::optional<LocalLiquid> LiquidLocal(const Vec3& pModel) const override;
+        void LiquidsLocal(const Vec3& pModel, std::vector<LocalLiquid>& out) const override;
 
         uint32_t RootId() const { return m_rootId; }
         const std::vector<Group>& Groups() const { return m_groups; }

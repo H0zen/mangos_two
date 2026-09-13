@@ -93,6 +93,13 @@ namespace
         g.liquid.flags.assign(size_t(tilesX) * tilesY, tileFlag);
         return g;
     }
+
+    bool NoLiquidAt(const WmoModel& m, const Vec3& p)
+    {
+        std::vector<ICollisionModel::LocalLiquid> out;
+        m.LiquidsLocal(p, out);
+        return out.empty();
+    }
 }
 
 TEST(BvhAgreesWithBruteForceOnEveryRay)
@@ -278,16 +285,17 @@ TEST(WmoLiquidRejectsPointsOutsideTheFootprint)
 
     WmoModel m(TriSoup{}, {}, std::move(groups), 0);
 
-    const auto inside = m.LiquidLocal(Vec3{1.f, 1.f, 0.f});
-    REQUIRE(inside.has_value());
-    CHECK_EQ(inside->z, 12.f);
-    CHECK_EQ(inside->entry, uint16_t(13));
+    std::vector<ICollisionModel::LocalLiquid> inside;
+    m.LiquidsLocal(Vec3{1.f, 1.f, 0.f}, inside);
+    REQUIRE(inside.size() == 1u);
+    CHECK_EQ(inside[0].z, 12.f);
+    CHECK_EQ(inside[0].entry, uint16_t(13));
 
     // Truncating a negative offset to int yields 0, so a point up to one tile outside
     // the low corner used to land on tile (0,0) and report liquid that is not there.
-    CHECK(!m.LiquidLocal(Vec3{-1.f, 1.f, 0.f}).has_value());
-    CHECK(!m.LiquidLocal(Vec3{1.f, -1.f, 0.f}).has_value());
-    CHECK(!m.LiquidLocal(Vec3{1000.f, 1.f, 0.f}).has_value());
+    CHECK(NoLiquidAt(m, Vec3{-1.f, 1.f, 0.f}));
+    CHECK(NoLiquidAt(m, Vec3{1.f, -1.f, 0.f}));
+    CHECK(NoLiquidAt(m, Vec3{1000.f, 1.f, 0.f}));
 }
 
 TEST(WmoLiquidHonoursTheDryTileNibble)
@@ -296,7 +304,7 @@ TEST(WmoLiquidHonoursTheDryTileNibble)
     groups.push_back(FlatLiquidGroup(2, 2, 12.f, 0x0F, 13, uint8_t(LiquidKind::Water)));
 
     WmoModel m(TriSoup{}, {}, std::move(groups), 0);
-    CHECK(!m.LiquidLocal(Vec3{1.f, 1.f, 0.f}).has_value());
+    CHECK(NoLiquidAt(m, Vec3{1.f, 1.f, 0.f}));
 }
 
 TEST(WmoLiquidOnlyGroupIsNotEmpty)

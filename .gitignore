@@ -10,7 +10,7 @@
 # Placeholder files for directories needed to be inside git but empty
 !.gitignore
 !.gitattributes
-
+/componente/
 # JetBrains - project settings
 /.idea/
 

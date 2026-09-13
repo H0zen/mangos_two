@@ -276,18 +276,22 @@ namespace world::terrain
             return column;
         }
 
-        // Deliberately not clipped to zBottom. A heightmap sample is a single value the
-        // tile already holds, so there is nothing to gain by hiding it, and a caller
+        // Deliberately not clipped at either end. A heightmap sample is a single value
+        // the tile already holds, so there is nothing to gain by hiding it, and a caller
         // probing from far above (MAX_HEIGHT) would otherwise get an empty column on a
         // map whose only surface is terrain.
+        //
+        // The clip at zTop was worse than pointless: a point below the surface -- anyone
+        // inside Undercity, which sits under Tirisfal -- dropped the ground overhead
+        // while the ADT liquid on that same ground stayed, so the column described a lake
+        // with nothing holding it up. Selections that walk upward (a ceiling, a blocker
+        // between a point and a water surface) need that ground to be there. Selections
+        // that walk downward are bounded by their own argument and never saw it anyway.
         if (tile && wantTerrain)
         {
             if (auto h = tile->TerrainHeight(x, y))
             {
-                if (*h <= zTop)
-                {
-                    column.AddSolid(*h, SurfaceKind::Terrain);
-                }
+                column.AddSolid(*h, SurfaceKind::Terrain);
             }
         }
 
@@ -296,6 +300,7 @@ namespace world::terrain
         const Vec3 downWorld{0.0f, 0.0f, -1.0f};
 
         std::vector<float> hits;
+        std::vector<ICollisionModel::LocalLiquid> liquids;
 
         auto probe = [&](const std::vector<StaticInstance>& instances)
         {
@@ -341,24 +346,27 @@ namespace world::terrain
                 // translation, so which height along the column it is taken from cannot
                 // change the pair those come out as.
                 const Vec3 pointLocal = inst.xf.worldToLocal(originWorld);
-                if (auto local = inst.model->LiquidLocal(pointLocal))
+                liquids.clear();
+                inst.model->LiquidsLocal(pointLocal, liquids);
+                for (const ICollisionModel::LocalLiquid& local : liquids)
                 {
-                    const LiquidKind kind = static_cast<LiquidKind>(local->kind);
-                    if (kind != LiquidKind::None)
+                    const LiquidKind kind = static_cast<LiquidKind>(local.kind);
+                    if (kind == LiquidKind::None)
                     {
-                        // Lift the surface back through the placement itself: it sits
-                        // directly over the query column, so transforming that exact
-                        // point is exact. Reconstructing the lift by hand applies the
-                        // placement scale twice and assumes the model's local Z is
-                        // parallel to world Z.
-                        const Vec3 surfaceLocal{pointLocal.x, pointLocal.y, local->z};
-                        LiquidInfo info;
-                        info.level = inst.xf.localToWorld(surfaceLocal).z;
-                        info.kind = kind;
-                        info.entry = local->entry;
-                        info.deep = local->deep;
-                        column.AddLiquid(info);
+                        continue;
                     }
+                    // Lift the surface back through the placement itself: it sits
+                    // directly over the query column, so transforming that exact
+                    // point is exact. Reconstructing the lift by hand applies the
+                    // placement scale twice and assumes the model's local Z is
+                    // parallel to world Z.
+                    const Vec3 surfaceLocal{pointLocal.x, pointLocal.y, local.z};
+                    LiquidInfo info;
+                    info.level = inst.xf.localToWorld(surfaceLocal).z;
+                    info.kind = kind;
+                    info.entry = local.entry;
+                    info.deep = local.deep;
+                    column.AddLiquid(info);
                 }
             }
         };

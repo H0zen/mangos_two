@@ -407,7 +407,11 @@ GridMapLiquidStatus TerrainInfo::getLiquidStatus(float x, float y, float z,
     const world::terrain::Column column =
         ColumnAt(x, y, z + FLOOR_BURIED_LIFT, z - FLOOR_SEARCH_DOWN);
 
-    const auto liquid = column.HighestLiquid();
+    // The liquid THIS point is in, not the highest one the column happens to hold. Both
+    // halves of the answer below -- the surface and the floor under it -- have to be
+    // chosen from the same storey, or a dry floor inside a building reports the water
+    // over its roof and the player drowns standing up.
+    const auto liquid = column.LiquidOver(z);
     if (!liquid || !liquid->liquidEntry)
     {
         return LIQUID_MAP_NO_WATER;

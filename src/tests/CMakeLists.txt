@@ -46,6 +46,7 @@ set(SRC_GRP_TESTS
     OpenSSLProviderTest.cpp
     ClientParserTest.cpp
     TerrainModelTest.cpp
+    ColumnSelectionTest.cpp
     TileSerializerTest.cpp
     ModelMapTest.cpp
     NavBinningTest.cpp

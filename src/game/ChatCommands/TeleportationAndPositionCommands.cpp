@@ -34,13 +34,18 @@
  * - Location saving and loading
  */
 
+#include <algorithm>
 #include <cmath>
 #include <string>
+#include <vector>
 #include "Chat.h"
 #include "ObjectMgr.h"
 #include "World.h"
 #include "MapManager.h"
 #include "CellImpl.h"
+#include "DBCStores.h"
+#include "GridMap.h"
+#include "terrain/Column.hpp"
 
  /*
      All commands related to Teleportation
@@ -594,8 +599,56 @@ bool ChatHandler::HandleRecallCommand(char* args)
     return HandleGoHelper(target, target->m_recallMap, target->m_recallX, target->m_recallY, &target->m_recallZ, &target->m_recallO);
 }
 
+namespace
+{
+    /// The status is a single value, not a mask, despite the flag-shaped constants.
+    const char* GpsLiquidStatus(GridMapLiquidStatus status)
+    {
+        switch (status)
+        {
+            case LIQUID_MAP_NO_WATER:    return "NO_WATER";
+            case LIQUID_MAP_ABOVE_WATER: return "ABOVE_WATER";
+            case LIQUID_MAP_WATER_WALK:  return "WATER_WALK";
+            case LIQUID_MAP_IN_WATER:    return "IN_WATER";
+            case LIQUID_MAP_UNDER_WATER: return "UNDER_WATER";
+        }
+        return "?";
+    }
+
+    /// One bit per LiquidType.dbc SoundBank, so exactly one of the four is ever set.
+    /// Printing the family and the row id side by side is the point: a row whose family
+    /// surprises you is the whole class of bug this is here to expose.
+    const char* GpsLiquidFamily(uint32 typeFlags)
+    {
+        if (typeFlags & MAP_LIQUID_TYPE_WATER) { return "WATER"; }
+        if (typeFlags & MAP_LIQUID_TYPE_OCEAN) { return "OCEAN"; }
+        if (typeFlags & MAP_LIQUID_TYPE_MAGMA) { return "MAGMA"; }
+        if (typeFlags & MAP_LIQUID_TYPE_SLIME) { return "SLIME"; }
+        return "none";
+    }
+
+    /// What a surface IS, which is half of what makes a height worth printing: the
+    /// heightmap, a baked building, or a door posed this tick all answer differently
+    /// when something moves.
+    const char* GpsSurfaceKind(world::terrain::SurfaceKind kind)
+    {
+        switch (kind)
+        {
+            case world::terrain::SurfaceKind::Terrain: return "ground";
+            case world::terrain::SurfaceKind::Static:  return "building";
+            case world::terrain::SurfaceKind::Live:    return "door/lift";
+            case world::terrain::SurfaceKind::Liquid:  return "liquid";
+        }
+        return "surface";
+    }
+
+}
+
 /**
  * @brief Handler for HandleGPSCommand command.
+ *
+ * Prints the spatial answer for a point together with the column it was selected from,
+ * so a wrong answer can be read rather than guessed at.
  *
  * @param args Command arguments.
  * @returns True if the command executed successfully, false otherwise.
@@ -648,67 +701,195 @@ bool ChatHandler::HandleGPSCommand(char* args)
     }
 
     Map const* map = obj->GetMap();
-    float ground_z = map->GetHeight(obj->GetPhaseMask(), obj->Where().X(), obj->Where().Y(), MAX_HEIGHT);
-    float floor_z = map->GetHeight(obj->GetPhaseMask(), obj->Where().X(), obj->Where().Y(), obj->Where().Z());
-
-
-    GridPair p = MaNGOS::ComputeGridPair(obj->Where().X(), obj->Where().Y());
-
-    int gx = 63 - p.x_coord;
-    int gy = 63 - p.y_coord;
-
-    // One tile carries terrain and collision together, so there is one answer to give
-    // where there used to be two columns.
-    uint32 have_map = TerrainInfo::ExistTile(obj->GetMapId(), gx, gy) ? 1 : 0;
-    uint32 have_vmap = have_map;
-
     TerrainInfo const* terrain = obj->GetTerrain();
 
-    if (have_map)
+    const float x = obj->Where().X();
+    const float y = obj->Where().Y();
+    const float z = obj->Where().Z();
+
+    GridPair p = MaNGOS::ComputeGridPair(x, y);
+    const int gx = 63 - p.x_coord;
+    const int gy = 63 - p.y_coord;
+    const bool haveTile = TerrainInfo::ExistTile(obj->GetMapId(), gx, gy);
+
+    PSendSysMessage("|cffffff00%s|r  (%s %s %u)", obj->GetName(),
+                    obj->GetTypeId() == TYPEID_PLAYER ? "player" : "creature",
+                    obj->GetTypeId() == TYPEID_PLAYER ? "GUID" : "entry",
+                    obj->GetTypeId() == TYPEID_PLAYER ? obj->GetGUIDLow() : obj->GetEntry());
+
+    PSendSysMessage("Map %u \"%s\"  instance %u  phase 0x%X", obj->GetMapId(),
+                    mapEntry ? mapEntry->MapName_lang[GetSessionDbcLocale()] : "<unknown>",
+                    obj->GetInstanceId(), obj->GetPhaseMask());
+
+    PSendSysMessage("Zone %u \"%s\"  area %u \"%s\"  %s", zone_id,
+                    zoneEntry ? zoneEntry->AreaName_lang[GetSessionDbcLocale()] : "<unknown>",
+                    area_id,
+                    areaEntry ? areaEntry->AreaName_lang[GetSessionDbcLocale()] : "<unknown>",
+                    !haveTile ? "[no tile]" : (terrain->IsOutdoors(x, y, z) ? "[outdoor]"
+                                                                            : "[indoor]"));
+
+    PSendSysMessage("Position  %.3f, %.3f, %.3f  facing %.3f   zone map (%.1f, %.1f)", x, y,
+                    z, obj->Where().Facing(), zone_x, zone_y);
+
+    PSendSysMessage("grid [%u,%u]  cell [%u,%u]  tile [%d,%d] %s", cell.GridX(),
+                    cell.GridY(), cell.CellX(), cell.CellY(), gx, gy,
+                    haveTile ? "present" : "MISSING");
+
+    // The column is the whole truth this command exists to show: one sweep, every
+    // surface under and just over the point, with the selections named against it. Read
+    // downward and a wrong answer explains itself -- which surface was picked, and what
+    // else was standing there to be picked instead.
+    //
+    // Every height below is stated as what it IS and how far it is from the player.
+    // A bare number labelled with yet another word ending in Z tells nobody anything:
+    // the old output printed a "GroundZ" and a "FloorZ" that were two different probes
+    // of the same column, side by side, with no hint of how they differed or which one
+    // any given system actually used.
+    // Sun to the bottom of hell. The engine's own queries use a narrow window around the
+    // point because they run every tick for every unit; this one runs when a GM types it,
+    // so it has no excuse to hide anything. A surface the narrow sweep never saw is
+    // exactly the surface a bug is hiding behind -- the whole Undercity drowning went
+    // unseen because the ground overhead fell outside a window like that.
+    const world::terrain::Column column =
+        map->ColumnAt(obj->GetPhaseMask(), x, y, MAX_HEIGHT, -MAX_HEIGHT);
+
+    const auto floor = column.Floor(z, FLOOR_SEARCH_UP);
+    const auto ceiling = column.LowestSolidAbove(z);
+
+    GridMapLiquidData liquid = {};
+    const GridMapLiquidStatus res = terrain->getLiquidStatus(x, y, z, MAP_ALL_LIQUIDS, &liquid);
+
+    // One line for the verdict, because the verdict is what the rest of the server acts
+    // on. Row id and family always travel together: a row whose family surprises you is
+    // the entire class of bug that once turned the blood elf coast into lava.
+    if (!res)
     {
-        if (terrain->IsOutdoors(obj->Where().X(), obj->Where().Y(), obj->Where().Z()))
-        {
-            PSendSysMessage("You are OUTdoor");
-        }
-        else
-        {
-            PSendSysMessage("You are INdoor");
-        }
+        PSendSysMessage("Liquid here: |cff808080none|r");
     }
     else
     {
-        PSendSysMessage("no terrain tile available for area info");
+        LiquidTypeEntry const* row = sLiquidTypeStore.LookupEntry(liquid.entry);
+        PSendSysMessage("Liquid here: |cff00ff00%s|r  row %u \"%s\" family %s%s%s",
+                        GpsLiquidStatus(res), liquid.entry,
+                        row ? row->Name : "<not in LiquidType.dbc>",
+                        GpsLiquidFamily(liquid.type_flags),
+                        (liquid.type_flags & MAP_LIQUID_TYPE_DARK_WATER) ? " +dark" : "",
+                        (row && row->SpellID) ? "  (applies a spell)" : "");
     }
 
-    PSendSysMessage(LANG_MAP_POSITION,
-                    obj->GetMapId(), (mapEntry ? mapEntry->MapName_lang[GetSessionDbcLocale()] : "<unknown>"),
-                    zone_id, (zoneEntry ? zoneEntry->AreaName_lang[GetSessionDbcLocale()] : "<unknown>"),
-                    area_id, (areaEntry ? areaEntry->AreaName_lang[GetSessionDbcLocale()] : "<unknown>"),
-                    obj->GetPhaseMask(),
-                    obj->Where().X(), obj->Where().Y(), obj->Where().Z(), obj->Where().Facing(),
-                    cell.GridX(), cell.GridY(), cell.CellX(), cell.CellY(), obj->GetInstanceId(),
-                    zone_x, zone_y, ground_z, floor_z, have_map, have_vmap);
-
-    DEBUG_LOG("Player %s GPS call for %s '%s' (%s: %u):",
-              m_session ? GetNameLink().c_str() : GetMangosString(LANG_CONSOLE_COMMAND),
-              (obj->GetTypeId() == TYPEID_PLAYER ? "player" : "creature"), obj->GetName(),
-              (obj->GetTypeId() == TYPEID_PLAYER ? "GUID" : "Entry"), (obj->GetTypeId() == TYPEID_PLAYER ? obj->GetGUIDLow() : obj->GetEntry()));
-
-    DEBUG_LOG(GetMangosString(LANG_MAP_POSITION),
-              obj->GetMapId(), (mapEntry ? mapEntry->MapName_lang[sWorld.GetDefaultDbcLocale()] : "<unknown>"),
-              zone_id, (zoneEntry ? zoneEntry->AreaName_lang[sWorld.GetDefaultDbcLocale()] : "<unknown>"),
-              area_id, (areaEntry ? areaEntry->AreaName_lang[sWorld.GetDefaultDbcLocale()] : "<unknown>"),
-              obj->GetPhaseMask(),
-              obj->Where().X(), obj->Where().Y(), obj->Where().Z(), obj->Where().Facing(),
-              cell.GridX(), cell.GridY(), cell.CellX(), cell.CellY(), obj->GetInstanceId(),
-              zone_x, zone_y, ground_z, floor_z, have_map, have_vmap);
-
-    GridMapLiquidData liquid_status;
-    GridMapLiquidStatus res = terrain->getLiquidStatus(obj->Where().X(), obj->Where().Y(), obj->Where().Z(), MAP_ALL_LIQUIDS, &liquid_status);
-    if (res)
+    // The table. Every component the one sweep returned, plus the player inserted as a
+    // row of his own, so the answer is read off a picture of the place rather than
+    // assembled in the reader's head from a list of numbers that all end in Z.
+    struct Row
     {
-        PSendSysMessage(LANG_LIQUID_STATUS, liquid_status.level, liquid_status.depth_level, liquid_status.type_flags, res);
+        float z;
+        bool isYou;
+        const world::terrain::Surface* surface;
+    };
+
+    const std::vector<world::terrain::Surface>& found = column.Surfaces();
+
+    std::vector<Row> rows;
+    rows.reserve(found.size() + 1);
+    for (const world::terrain::Surface& s : found)
+    {
+        rows.push_back(Row{s.z, false, &s});
     }
+    rows.push_back(Row{z, true, NULL});
+
+    // Highest first; on a tie the player floats above the surface he is resting on,
+    // which is the only reading that is never ambiguous.
+    std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b)
+    {
+        if (a.z != b.z) { return a.z > b.z; }
+        return a.isYou && !b.isYou;
+    });
+
+    // A deep column would scroll the verdict off the top of the chat frame, so keep the
+    // window around the player rather than the top of the world.
+    const size_t MAX_ROWS = 20;
+    size_t first = 0;
+    if (rows.size() > MAX_ROWS)
+    {
+        size_t you = 0;
+        for (size_t i = 0; i < rows.size(); ++i)
+        {
+            if (rows[i].isYou) { you = i; break; }
+        }
+        first = you > MAX_ROWS / 2 ? you - MAX_ROWS / 2 : 0;
+        if (first + MAX_ROWS > rows.size()) { first = rows.size() - MAX_ROWS; }
+    }
+    const size_t last = std::min(rows.size(), first + MAX_ROWS);
+
+    PSendSysMessage("Full sweep at %.2f, %.2f -- top of the world to the bottom -- "
+                    "%u component(s):", x, y, uint32(found.size()));
+    // Widths match the row format below exactly: 3 + %9.3f, then %-9s. WoW's chat font
+    // is proportional so nothing lines up perfectly in game, but the same text goes to
+    // the console and the log, where it does.
+    //
+    // Z is absolute on purpose. A distance-from-the-player column was here and was
+    // removed: nothing can be done with it. Movement, teleports and spawns are all
+    // absolute, and the player's own Z is already in the table on the marked row.
+    PSendSysMessage("           Z | what      | detail");
+    PSendSysMessage("   ----------+-----------+-----------------------------------");
+
+    if (first > 0)
+    {
+        PSendSysMessage("   ...%u above", uint32(first));
+    }
+
+    for (size_t i = first; i < last; ++i)
+    {
+        const Row& r = rows[i];
+
+        if (r.isYou)
+        {
+            PSendSysMessage("|cffffff00->|r %9.3f | |cffffff00YOU|r      | "
+                            "|cffffff00here you are|r",
+                            r.z);
+            continue;
+        }
+
+        const world::terrain::Surface& s = *r.surface;
+
+        if (s.Solid())
+        {
+            const char* role = "";
+            if (floor && std::fabs(s.z - *floor) < 0.001f)
+            {
+                role = "|cff00ff00the floor under you|r";
+            }
+            else if (ceiling && std::fabs(s.z - *ceiling) < 0.001f)
+            {
+                role = "the ceiling over you";
+            }
+            PSendSysMessage("   %9.3f | %-9s | %s", s.z, GpsSurfaceKind(s.kind), role);
+        }
+        else
+        {
+            LiquidTypeEntry const* srow = sLiquidTypeStore.LookupEntry(s.liquidEntry);
+            const bool picked = res != LIQUID_MAP_NO_WATER &&
+                                std::fabs(s.z - liquid.level) < 0.001f;
+            PSendSysMessage("   %9.3f | liquid    | row %u \"%s\"%s%s", s.z, s.liquidEntry,
+                            srow ? srow->Name : "?", s.deep ? " +deep" : "",
+                            picked ? "  |cff00ff00<- this one|r" : "");
+        }
+    }
+
+    if (last < rows.size())
+    {
+        PSendSysMessage("   ...%u below", uint32(rows.size() - last));
+    }
+
+    DEBUG_LOG("GPS by %s for %s '%s': map %u zone %u area %u phase 0x%X "
+              "pos (%.3f, %.3f, %.3f, %.3f) grid [%u,%u] cell [%u,%u] tile [%d,%d]%s "
+              "liquid status %u entry %u flags 0x%X level %.3f floor %.3f",
+              m_session ? GetNameLink().c_str() : GetMangosString(LANG_CONSOLE_COMMAND),
+              obj->GetTypeId() == TYPEID_PLAYER ? "player" : "creature", obj->GetName(),
+              obj->GetMapId(), zone_id, area_id, obj->GetPhaseMask(), x, y, z,
+              obj->Where().Facing(), cell.GridX(), cell.GridY(), cell.CellX(), cell.CellY(),
+              gx, gy, haveTile ? "" : " MISSING", uint32(res), liquid.entry,
+              liquid.type_flags, liquid.level, liquid.depth_level);
 
     return true;
 }

@@ -49,10 +49,19 @@ namespace world::terrain
             bool deep = false;
         };
 
-        virtual std::optional<LocalLiquid> LiquidLocal(const Vec3& pModel) const
+        /// EVERY liquid surface this model carries over the given model-space column,
+        /// appended in group order.
+        ///
+        /// Not "the" liquid: a WMO is a stack of rooms and more than one of them can
+        /// carry liquid over a single XY -- a canal with a sewer under it, a flooded
+        /// cellar below a fountain. MLIQ is indexed by local X and Y alone and no group
+        /// knows which storey was being asked about, so answering with the first match
+        /// resolves a question about HEIGHT using whatever order the groups happen to
+        /// sit in. The column gathers them all and the selection over it picks.
+        virtual void LiquidsLocal(const Vec3& pModel, std::vector<LocalLiquid>& out) const
         {
             (void)pModel;
-            return std::nullopt;
+            (void)out;
         }
     };
 }
