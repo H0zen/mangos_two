@@ -76,6 +76,11 @@ add_subdirectory(tools/extractor)
 # A clean parse is not correct geometry; this is what says whether it is.
 add_subdirectory(tools/height-check)
 
+# Audits the gather itself rather than one answer out of it: what ColumnAt's height
+# window hides from its own callers, and where selecting the highest liquid disagrees
+# with selecting the one the point is actually in.
+add_subdirectory(tools/column-audit)
+
 if (BUILD_MANGOSD OR BUILD_REALMD)
     if(WIN32)
         get_filename_component(MYSQL_LIB_DIR ${MySQL_LIBRARIES} DIRECTORY)
