@@ -85,9 +85,12 @@ namespace
     constexpr float ENGINE_UP = 2.0f;
     constexpr float WORLD_TOP = 100000.0f;
 
-    /// Two heights are the same surface when they are this close. Chosen well under the
-    /// smallest real floor-to-floor gap and well over float noise in a transform.
-    constexpr float SAME = 0.001f;
+    /// Two heights are the same surface when they are this close. Well under the
+    /// smallest real floor-to-floor gap, and deliberately well OVER float noise: a hit
+    /// is recovered as `sweepTop - t`, and a sweep that starts at the top of the world
+    /// has an ulp of about 0.008 there, so a tighter threshold makes one surface look
+    /// like two different ones purely from where the ray was started.
+    constexpr float SAME = 0.05f;
 
     const char* LiquidName(LiquidKind k)
     {
@@ -382,6 +385,12 @@ int main(int argc, char** argv)
         {
             engine.reset(new FusedTerrain(p.map));
         }
+
+        // Warm first, UNTIMED. The first column at a point pays for reading the tile off
+        // disk, which is not what is being measured and which whichever call goes first
+        // would otherwise absorb -- that is what made the full sweep time in at a
+        // twentieth of the narrow one, an impossible result that was pure I/O.
+        (void)engine->ColumnAt(p.x, p.y, p.z + ENGINE_LIFT, p.z - ENGINE_DOWN);
 
         // Timed separately. The narrow one is the call the server actually makes every
         // tick for every unit, so it is the number that decides whether closing the
