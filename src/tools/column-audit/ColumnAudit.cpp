@@ -59,6 +59,7 @@
 #include "terrain/Terrain.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -370,6 +371,9 @@ int main(int argc, char** argv)
     std::map<uint32_t, Score> perMap;
     Score total;
 
+    uint64_t narrowNs = 0, fullNs = 0;
+    uint64_t narrowSurfaces = 0, fullSurfaces = 0;
+
     size_t done = 0;
     for (const Probe& p : probes)
     {
@@ -379,10 +383,21 @@ int main(int argc, char** argv)
             engine.reset(new FusedTerrain(p.map));
         }
 
-        const Column full =
-            engine->ColumnAt(p.x, p.y, WORLD_TOP, -WORLD_TOP);
+        // Timed separately. The narrow one is the call the server actually makes every
+        // tick for every unit, so it is the number that decides whether closing the
+        // window is affordable; the full one is the diagnostic and nobody pays for it.
+        const auto t0 = std::chrono::steady_clock::now();
         const Column narrow =
             engine->ColumnAt(p.x, p.y, p.z + ENGINE_LIFT, p.z - ENGINE_DOWN);
+        const auto t1 = std::chrono::steady_clock::now();
+        const Column full =
+            engine->ColumnAt(p.x, p.y, WORLD_TOP, -WORLD_TOP);
+        const auto t2 = std::chrono::steady_clock::now();
+
+        narrowNs += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+        fullNs += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(t2 - t1).count());
+        narrowSurfaces += narrow.Surfaces().size();
+        fullSurfaces += full.Surfaces().size();
 
         Tally(perMap[p.map], full, narrow, p.z);
         Tally(total, full, narrow, p.z);
